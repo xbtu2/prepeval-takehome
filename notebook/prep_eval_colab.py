@@ -30,12 +30,12 @@ SMOKE = os.environ.get("PREPEVAL_SMOKE", "0") == "1"  # tiny CPU-friendly run th
 MODEL_ID = os.environ.get("PREPEVAL_MODEL", "Qwen/Qwen2.5-0.5B-Instruct" if SMOKE else "Qwen/Qwen2.5-1.5B-Instruct")
 REPO_URL = "https://github.com/xbtu2/prepeval-takehome.git"
 REPO_DIR = "prepeval-takehome"
-N_PER_FAMILY = 4 if SMOKE else 40  # 40 -> 240 test items
+N_PER_FAMILY = int(os.environ.get("PREPEVAL_N_PER_FAMILY", 4 if SMOKE else 40))  # 40 -> 240 test items
 ARMS = ["baseline", "fewshot", "pot", "sft"]
 BATCH_SIZE = 2 if SMOKE else 16  # 32 halves inference time on a T4 if the budget is tight
-SFT_MAX_STEPS = 3 if SMOKE else -1  # -1 = one epoch (179 steps at effective batch 8)
-SFT_TRAIN_ITEMS = 16 if SMOKE else None  # None = all
-MAX_NEW_TOKENS_CAP = 96 if SMOKE else None  # None = the arm's own cap
+SFT_MAX_STEPS = int(os.environ.get("PREPEVAL_SFT_STEPS", 3)) if SMOKE else -1  # -1 = one epoch (179 steps at effective batch 8)
+SFT_TRAIN_ITEMS = int(os.environ.get("PREPEVAL_SFT_ITEMS", 16)) if SMOKE else None  # None = all
+MAX_NEW_TOKENS_CAP = int(os.environ["PREPEVAL_MAX_NEW"]) if os.environ.get("PREPEVAL_MAX_NEW") else (96 if SMOKE else None)  # None = the arm's own cap
 SEED = 0
 OUT_DIR = "results"
 PROBE_N = 8 if SMOKE else 40
@@ -183,7 +183,8 @@ import copy
 
 # A GenerationConfig passed to generate() replaces the model's own (which carries repetition_penalty=1.05
 # and sampling defaults); greedy decoding with no repetition penalty is all we want.
-GEN = GenerationConfig(do_sample=False, repetition_penalty=1.0, pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id)
+GEN = GenerationConfig(do_sample=False, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=50,
+                       pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id)
 print(f"loaded {MODEL_ID}: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B params")
 
 
