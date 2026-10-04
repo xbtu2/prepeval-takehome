@@ -9,3 +9,6 @@ results/lora_adapter/
 results/smoke-lora_adapter/
 results/sft_tmp/
 results/smoke-sft_tmp/
+# run outputs stay local; the committed reference run lives in results/reference/
+results/*
+!results/reference/

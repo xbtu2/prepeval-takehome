@@ -9,7 +9,7 @@ from dataclasses import asdict, is_dataclass
 import numpy as np
 from scipy.stats import binomtest
 
-from .families import HELDOUT_FAMILIES, Item
+from .families import FAMILIES, HELDOUT_FAMILIES, Item
 from .grading import Grade
 
 
@@ -56,7 +56,8 @@ def summarize(items: list[Item], grades_by_arm: dict[str, dict[str, Grade]], bas
     acc_flags = [int(grades[it.id].accepted) for it in measured]
     vectors[arm] = [int(it.id in grades and grades[it.id].measured and grades[it.id].accepted) for it in items]
     fam_rows = {}
-    for fam in sorted({it.family for it in items}):
+    present = {it.family for it in items}
+    for fam in [f for f in FAMILIES if f in present] + sorted(present - set(FAMILIES)):  # canonical order, held-out last
       fi = [it for it in measured if it.family == fam]
       flags = [int(grades[it.id].accepted) for it in fi]
       lo, hi = bootstrap_ci(flags) if len(flags) >= 10 else (float("nan"), float("nan"))

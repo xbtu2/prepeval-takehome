@@ -1,0 +1,261 @@
+device=cuda dtype=torch.float16 torch=2.14.1+cu126 python=3.12.15
+NVIDIA GeForce RTX 4090 23.6 GB
+display: script (figures saved to files)
+This run evaluates **240 items** (dilute_stock 40, serial_dilution 40, master_mix 40, normalize_samples 40, well_addressing 40, labware_fit 40; 48 infeasible traps = 20 %). The training split holds 1431 rows in 4 families. Build-time leak check: pass (test_prompt_in_train 0, heldout_in_train 0, gold_value_in_prompt 0, fewshot_value_in_test 0). Held-out families (never in train): `normalize_samples`, `labware_fit`.
+
+Example item
+--------------------------------------------------------------------------------
+Task: Prepare 400 µL of ATP at 0.2 mM from the stock listed below, using reaction buffer as the diluent.
+World:
+- stock: ATP at 100 mM
+- diluent: reaction buffer
+- final volume required: 400 µL
+- procedure: one direct transfer of stock into the diluent (no intermediate dilutions)
+- smallest volume the pipette can transfer: 2 µL
+Question: How much stock and how much diluent (in µL) go into the final solution?
+Answer with one JSON object with exactly these keys: {"stock_uL": <number>, "diluent_uL": <number>, "feasible": <true|false>}. Use "feasible": false if the request cannot be carried out as stated with the materials listed (the other values may then be null).
+--------------------------------------------------------------------------------
+gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+| control | value | expected |
+|---|---|---|
+| gold_accepted | 1.000 | 1.00 |
+| mutations_rejected | 1.000 | 1.00 |
+| gold_program_through_sandbox | 1.000 | 1.00 |
+| policy_always_feasible_zeros | 0.000 | 0.00 |
+| policy_always_infeasible | 0.200 | = trap share |
+| leak_check_pass | True | True |
+| effective_floor | 0.200 | strongest non-solving control |
+(1125 single-field corruptions tested)
+SFT rows fit: max 782 tokens <= 1024
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:  30%|██▉       | 101/338 [00:00<00:00, 918.39it/s]Loading weights:  57%|█████▋    | 193/338 [00:00<00:00, 796.03it/s]Loading weights:  81%|████████  | 274/338 [00:00<00:00, 747.86it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 751.65it/s]
+loaded Qwen/Qwen2.5-1.5B-Instruct: 1.54B params
+[probe] n=36 accepted=0.139 time=6s (0.17s/item) format_fail=0.03 hit_token_cap=0.00
+error classes: {'feasibility': 12, 'wrong_value': 18, 'format': 1}
+[baseline] n=240 accepted=0.092 time=29s (0.12s/item) format_fail=0.05 hit_token_cap=0.00
+[fewshot] n=240 accepted=0.154 time=94s (0.39s/item) format_fail=0.02 hit_token_cap=0.02
+[transformers] Passing `generation_config` together with generation-related arguments=({'stop_strings'}) is deprecated and will be removed in future versions. Please pass either a `generation_config` object OR all generation parameters explicitly, but not both.
+[pot] n=240 accepted=0.062 time=55s (0.23s/item) format_fail=0.14 hit_token_cap=0.12
+sandbox outcomes (pot): {'ok': 174, 'runtime_error': 42, 'rejected': 24}
+| arm | n | accepted | acc | 95% CI | in-train fams | held-out fams | trap recall | false refusal | format fail | Δ vs baseline [CI] | McNemar p |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline | 240 | 22 | 0.092 | [0.058, 0.129] | 0.100 | 0.075 | 0.23 | 0.21 | 0.05 | — | — |
+| fewshot | 240 | 37 | 0.154 | [0.108, 0.200] | 0.200 | 0.062 | 0.19 | 0.08 | 0.02 | +0.063 [+0.017, +0.108] | 0.017 |
+| pot | 240 | 15 | 0.062 | [0.033, 0.096] | 0.075 | 0.037 | 0.19 | 0.19 | 0.14 | -0.029 [-0.071, +0.013] | 0.23 |
+**This run.** baseline 0.092 [0.058, 0.129]; fewshot 0.154 [0.108, 0.200] (+0.063 vs baseline, p = 0.017); pot 0.062 [0.033, 0.096] (-0.029 vs baseline, p = 0.23); n = 240. Wall time per item at batch size 16 on NVIDIA GeForce RTX 4090: baseline 0.12 s, fewshot 0.39 s, pot 0.23 s.
+
+**The baseline answered without working.** 240/240 baseline completions are a bare JSON object with nothing before it, although the system message invites the model to work through the arithmetic. The comparison below is therefore direct answer against guided reasoning (fewshot), against code (pot), and later against a fine-tune taught to write a trace. Its 22 accepted items are 11 solved feasible items (6 % of 192 feasible) and 11 trap refusals.
+
+**Why the prompting arms sit below the always-refuse floor of 0.200.** A policy that refuses every item scores the trap share. To beat it a model has to solve feasible items faster than it loses traps.
+- `baseline`: refuses 11/46 traps and 41/182 feasible items (p = 0.85); the flag carries no information about infeasibility, so its trap refusals are refusals it would have made anyway. Forcing `feasible = true` on every prediction would score 0.046 against the recorded 0.092; no refused feasible item carried correct values.
+- `fewshot`: refuses 9/47 traps and 16/189 feasible items (p = 0.059); the evidence is inconclusive. Forcing `feasible = true` on every prediction would score 0.117 against the recorded 0.154; no refused feasible item carried correct values.
+- `pot`: refuses 9/44 traps and 37/162 feasible items (p = 0.84); the flag carries no information about infeasibility, so its trap refusals are refusals it would have made anyway. Forcing `feasible = true` on every prediction would score 0.025 against the recorded 0.062; no refused feasible item carried correct values.
+
+**The few-shot gain is one family copying one example.** Of the 25 items fewshot wins and the baseline loses, 24 are `dilute_stock`, the family of a worked example. Excluding the exemplar families (`dilute_stock`, `well_addressing`; n = 160) fewshot loses: 5 against 10 accepted, exact p = 0.062. The arm is exemplar-sensitive; read the headline delta of +0.063 as a property of these exemplars. The wins are 22 solved feasible items and 3 trap refusals; losses 10.
+
+**PoT's failures sit in the model's programs.** Sandbox outcomes: 174 ok, 42 runtime errors, 24 rejected, 0 timeouts, 0 without code. 24/24 rejected programs hit the token cap, so all of them are truncations rather than policy rejections. 38/42 runtime errors are `true`/`false`/`null` written as JSON inside Python (a dict literal, not a program). PoT ran at 320 new tokens against 512 for the other arms and hit its cap on 30 items; a PoT-below-baseline reading is partly a budget artefact.
+
+**0 of the 3 prompting arms clear the floor.** The next three sections try the weight-level lever.
+**Where the prompting arms fail.** One row per family, one panel per arm; each item is one of five outcomes.
+saved results/fig_outcomes.png
+**Does the `feasible` flag carry information?** Refusal rate on feasible items (x) against refusal rate on traps (y). A flag that tracks infeasibility sits above the diagonal; a flag that refuses at random sits on it.
+saved results/fig_refusals.png
+**1431 training rows** (dilute_stock 375, serial_dilution 375, master_mix 375, well_addressing 306); infeasible 284/1431 (20 %). Token length median 417, longest 782, cap 1024; 0 rows would be truncated.
+A feasible training completion
+--------------------------------------------------------------------------------
+Stock 5 X, target 1 X (same unit). Final volume 2.5 mL = 2500 µL. Dilution factor = C1/C2 = 5/1 = 5; by C1·V1 = C2·V2, stock volume V1 = V2/5 = 2500/5 = 500 µL. Diluent = 2500 − 500 = 2000 µL.
+
+Final answer:
+```json
+{"stock_uL": 500.0, "diluent_uL": 2000.0, "feasible": true}
+```
+
+An infeasible training completion
+--------------------------------------------------------------------------------
+Put both concentrations in the same unit: stock 100 mM = 100000 µM; target 100 µM. Final volume 1.5 mL = 1500 µL. Dilution factor = C1/C2 = 100000/100 = 1000; by C1·V1 = C2·V2, stock volume V1 = V2/1000 = 1500/1000 = 1.5 µL. 1.5 µL is below the pipette minimum of 2 µL, so this cannot be pipetted as stated: infeasible.
+
+Final answer:
+```json
+{"stock_uL": null, "diluent_uL": null, "feasible": false}
+```
+**Training rows fit under the sequence cap.** Completion-only loss sees every gold JSON only if no row is truncated.
+saved results/fig_train_lengths.png
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:  74%|███████▍  | 251/338 [00:00<00:00, 2456.03it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 2707.74it/s]
+trainable params: 18,464,768 || all params: 1,562,179,072 || trainable%: 1.1820
+Adding EOS to train dataset (num_proc=1):   0%|          | 0/1431 [00:00<?, ? examples/s]Adding EOS to train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 7465.33 examples/s]Adding EOS to train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 3419.65 examples/s]
+Tokenizing train dataset (num_proc=1):   0%|          | 0/1431 [00:00<?, ? examples/s]Tokenizing train dataset (num_proc=1):   6%|▌         | 87/1431 [00:01<00:22, 60.29 examples/s]Tokenizing train dataset (num_proc=1):  18%|█▊        | 255/1431 [00:01<00:05, 206.10 examples/s]Tokenizing train dataset (num_proc=1):  29%|██▉       | 412/1431 [00:01<00:02, 361.40 examples/s]Tokenizing train dataset (num_proc=1):  41%|████▏     | 593/1431 [00:01<00:01, 526.40 examples/s]Tokenizing train dataset (num_proc=1):  54%|█████▍    | 770/1431 [00:01<00:00, 667.59 examples/s]Tokenizing train dataset (num_proc=1):  63%|██████▎   | 904/1431 [00:02<00:00, 782.20 examples/s]Tokenizing train dataset (num_proc=1):  74%|███████▍  | 1064/1431 [00:02<00:00, 765.63 examples/s]Tokenizing train dataset (num_proc=1):  85%|████████▌ | 1223/1431 [00:02<00:00, 917.24 examples/s]Tokenizing train dataset (num_proc=1):  97%|█████████▋| 1386/1431 [00:02<00:00, 1066.04 examples/s]Tokenizing train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:02<00:00, 511.77 examples/s] 
+Building labels for train dataset (num_proc=1):   0%|          | 0/1431 [00:00<?, ? examples/s]Building labels for train dataset (num_proc=1):  44%|████▍     | 632/1431 [00:00<00:00, 2727.08 examples/s]Building labels for train dataset (num_proc=1):  70%|██████▉   | 1000/1431 [00:00<00:00, 3080.65 examples/s]Building labels for train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 2210.83 examples/s]
+Truncating train dataset (num_proc=1):   0%|          | 0/1431 [00:00<?, ? examples/s]Truncating train dataset (num_proc=1):  70%|██████▉   | 1000/1431 [00:00<00:00, 3468.80 examples/s]Truncating train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 2403.68 examples/s]
+Dropping fully masked examples from train dataset (num_proc=1):   0%|          | 0/1431 [00:00<?, ? examples/s]Dropping fully masked examples from train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 5960.58 examples/s]Dropping fully masked examples from train dataset (num_proc=1): 100%|██████████| 1431/1431 [00:00<00:00, 3201.87 examples/s]
+  0%|          | 0/179 [00:00<?, ?it/s]  1%|          | 1/179 [00:00<01:51,  1.60it/s]  1%|          | 2/179 [00:01<01:38,  1.80it/s]  2%|▏         | 3/179 [00:01<01:33,  1.88it/s]  2%|▏         | 4/179 [00:02<01:32,  1.88it/s]  3%|▎         | 5/179 [00:02<01:26,  2.01it/s]  3%|▎         | 6/179 [00:03<01:28,  1.95it/s]  4%|▍         | 7/179 [00:03<01:28,  1.95it/s]  4%|▍         | 8/179 [00:04<01:25,  2.01it/s]  5%|▌         | 9/179 [00:04<01:26,  1.96it/s]  6%|▌         | 10/179 [00:05<01:27,  1.93it/s]                                                {'loss': '0.7724', 'grad_norm': '0.5814', 'learning_rate': '0.0001997', 'entropy': '0.7622', 'num_tokens': '3.782e+04', 'mean_token_accuracy': '0.8133', 'epoch': '0.05587'}
+  6%|▌         | 10/179 [00:05<01:27,  1.93it/s]  6%|▌         | 11/179 [00:05<01:22,  2.04it/s]  7%|▋         | 12/179 [00:06<01:23,  2.01it/s]  7%|▋         | 13/179 [00:06<01:22,  2.01it/s]  8%|▊         | 14/179 [00:07<01:20,  2.04it/s]  8%|▊         | 15/179 [00:07<01:18,  2.08it/s]  9%|▉         | 16/179 [00:07<01:15,  2.16it/s]  9%|▉         | 17/179 [00:08<01:17,  2.09it/s] 10%|█         | 18/179 [00:09<01:18,  2.04it/s] 11%|█         | 19/179 [00:09<01:13,  2.19it/s] 11%|█         | 20/179 [00:09<01:19,  2.01it/s]                                                {'loss': '0.2305', 'grad_norm': '0.7346', 'learning_rate': '0.0001968', 'entropy': '0.3249', 'num_tokens': '7.388e+04', 'mean_token_accuracy': '0.9298', 'epoch': '0.1117'}
+ 11%|█         | 20/179 [00:09<01:19,  2.01it/s] 12%|█▏        | 21/179 [00:10<01:16,  2.07it/s] 12%|█▏        | 22/179 [00:10<01:17,  2.03it/s] 13%|█▎        | 23/179 [00:11<01:19,  1.95it/s] 13%|█▎        | 24/179 [00:12<01:18,  1.98it/s] 14%|█▍        | 25/179 [00:12<01:15,  2.05it/s] 15%|█▍        | 26/179 [00:12<01:14,  2.06it/s] 15%|█▌        | 27/179 [00:13<01:16,  1.98it/s] 16%|█▌        | 28/179 [00:13<01:15,  2.01it/s] 16%|█▌        | 29/179 [00:14<01:17,  1.94it/s] 17%|█▋        | 30/179 [00:15<01:16,  1.94it/s]                                                {'loss': '0.066', 'grad_norm': '0.6946', 'learning_rate': '0.0001908', 'entropy': '0.07578', 'num_tokens': '1.117e+05', 'mean_token_accuracy': '0.9776', 'epoch': '0.1676'}
+ 17%|█▋        | 30/179 [00:15<01:16,  1.94it/s] 17%|█▋        | 31/179 [00:15<01:13,  2.02it/s] 18%|█▊        | 32/179 [00:16<01:14,  1.98it/s] 18%|█▊        | 33/179 [00:16<01:12,  2.03it/s] 19%|█▉        | 34/179 [00:16<01:12,  2.01it/s] 20%|█▉        | 35/179 [00:17<01:11,  2.01it/s] 20%|██        | 36/179 [00:17<01:06,  2.14it/s] 21%|██        | 37/179 [00:18<01:08,  2.07it/s] 21%|██        | 38/179 [00:18<01:09,  2.03it/s] 22%|██▏       | 39/179 [00:19<01:10,  1.98it/s] 22%|██▏       | 40/179 [00:20<01:12,  1.92it/s]                                                {'loss': '0.05013', 'grad_norm': '0.1747', 'learning_rate': '0.0001817', 'entropy': '0.05962', 'num_tokens': '1.486e+05', 'mean_token_accuracy': '0.9846', 'epoch': '0.2235'}
+ 22%|██▏       | 40/179 [00:20<01:12,  1.92it/s] 23%|██▎       | 41/179 [00:20<01:12,  1.91it/s] 23%|██▎       | 42/179 [00:20<01:08,  2.00it/s] 24%|██▍       | 43/179 [00:21<01:05,  2.09it/s] 25%|██▍       | 44/179 [00:21<01:05,  2.07it/s] 25%|██▌       | 45/179 [00:22<01:02,  2.13it/s] 26%|██▌       | 46/179 [00:22<01:04,  2.06it/s] 26%|██▋       | 47/179 [00:23<01:06,  1.99it/s] 27%|██▋       | 48/179 [00:23<01:04,  2.03it/s] 27%|██▋       | 49/179 [00:24<01:01,  2.11it/s] 28%|██▊       | 50/179 [00:24<01:05,  1.96it/s]                                                {'loss': '0.03458', 'grad_norm': '0.2375', 'learning_rate': '0.0001701', 'entropy': '0.05118', 'num_tokens': '1.853e+05', 'mean_token_accuracy': '0.9878', 'epoch': '0.2793'}
+ 28%|██▊       | 50/179 [00:24<01:05,  1.96it/s] 28%|██▊       | 51/179 [00:25<01:05,  1.96it/s] 29%|██▉       | 52/179 [00:25<01:04,  1.97it/s] 30%|██▉       | 53/179 [00:26<01:05,  1.92it/s] 30%|███       | 54/179 [00:26<01:05,  1.91it/s] 31%|███       | 55/179 [00:27<01:04,  1.91it/s] 31%|███▏      | 56/179 [00:27<01:02,  1.96it/s] 32%|███▏      | 57/179 [00:28<01:01,  1.99it/s] 32%|███▏      | 58/179 [00:29<01:02,  1.93it/s] 33%|███▎      | 59/179 [00:29<01:01,  1.96it/s] 34%|███▎      | 60/179 [00:30<01:00,  1.97it/s]                                                {'loss': '0.01892', 'grad_norm': '0.3994', 'learning_rate': '0.0001561', 'entropy': '0.0202', 'num_tokens': '2.23e+05', 'mean_token_accuracy': '0.993', 'epoch': '0.3352'}
+ 34%|███▎      | 60/179 [00:30<01:00,  1.97it/s] 34%|███▍      | 61/179 [00:30<00:56,  2.07it/s] 35%|███▍      | 62/179 [00:30<00:56,  2.08it/s] 35%|███▌      | 63/179 [00:31<00:59,  1.94it/s] 36%|███▌      | 64/179 [00:31<00:55,  2.06it/s] 36%|███▋      | 65/179 [00:32<00:56,  2.03it/s] 37%|███▋      | 66/179 [00:33<00:58,  1.95it/s] 37%|███▋      | 67/179 [00:33<00:57,  1.95it/s] 38%|███▊      | 68/179 [00:34<00:57,  1.92it/s] 39%|███▊      | 69/179 [00:34<00:56,  1.94it/s] 39%|███▉      | 70/179 [00:35<00:58,  1.87it/s]                                                {'loss': '0.01955', 'grad_norm': '0.2345', 'learning_rate': '0.0001403', 'entropy': '0.02104', 'num_tokens': '2.604e+05', 'mean_token_accuracy': '0.9927', 'epoch': '0.3911'}
+ 39%|███▉      | 70/179 [00:35<00:58,  1.87it/s] 40%|███▉      | 71/179 [00:35<00:56,  1.93it/s] 40%|████      | 72/179 [00:36<00:57,  1.88it/s] 41%|████      | 73/179 [00:36<00:56,  1.88it/s] 41%|████▏     | 74/179 [00:37<00:53,  1.97it/s] 42%|████▏     | 75/179 [00:37<00:53,  1.95it/s] 42%|████▏     | 76/179 [00:38<00:51,  1.98it/s] 43%|████▎     | 77/179 [00:38<00:52,  1.96it/s] 44%|████▎     | 78/179 [00:39<00:50,  2.01it/s] 44%|████▍     | 79/179 [00:39<00:51,  1.96it/s] 45%|████▍     | 80/179 [00:40<00:49,  2.01it/s]                                                {'loss': '0.01886', 'grad_norm': '0.1201', 'learning_rate': '0.0001233', 'entropy': '0.02514', 'num_tokens': '2.978e+05', 'mean_token_accuracy': '0.9931', 'epoch': '0.4469'}
+ 45%|████▍     | 80/179 [00:40<00:49,  2.01it/s] 45%|████▌     | 81/179 [00:40<00:47,  2.06it/s] 46%|████▌     | 82/179 [00:41<00:48,  2.02it/s] 46%|████▋     | 83/179 [00:41<00:46,  2.08it/s] 47%|████▋     | 84/179 [00:42<00:45,  2.11it/s] 47%|████▋     | 85/179 [00:42<00:44,  2.12it/s] 48%|████▊     | 86/179 [00:43<00:45,  2.05it/s] 49%|████▊     | 87/179 [00:43<00:44,  2.05it/s] 49%|████▉     | 88/179 [00:44<00:43,  2.07it/s] 50%|████▉     | 89/179 [00:44<00:43,  2.06it/s] 50%|█████     | 90/179 [00:45<00:43,  2.03it/s]                                                {'loss': '0.01594', 'grad_norm': '0.1687', 'learning_rate': '0.0001054', 'entropy': '0.01812', 'num_tokens': '3.343e+05', 'mean_token_accuracy': '0.9935', 'epoch': '0.5028'}
+ 50%|█████     | 90/179 [00:45<00:43,  2.03it/s] 51%|█████     | 91/179 [00:45<00:44,  1.97it/s] 51%|█████▏    | 92/179 [00:46<00:44,  1.95it/s] 52%|█████▏    | 93/179 [00:46<00:44,  1.92it/s] 53%|█████▎    | 94/179 [00:47<00:43,  1.94it/s] 53%|█████▎    | 95/179 [00:47<00:43,  1.94it/s] 54%|█████▎    | 96/179 [00:48<00:43,  1.92it/s] 54%|█████▍    | 97/179 [00:48<00:43,  1.90it/s] 55%|█████▍    | 98/179 [00:49<00:42,  1.89it/s] 55%|█████▌    | 99/179 [00:49<00:42,  1.86it/s] 56%|█████▌    | 100/179 [00:50<00:40,  1.93it/s]                                                 {'loss': '0.01271', 'grad_norm': '0.3179', 'learning_rate': '8.74e-05', 'entropy': '0.01378', 'num_tokens': '3.731e+05', 'mean_token_accuracy': '0.9945', 'epoch': '0.5587'}
+ 56%|█████▌    | 100/179 [00:50<00:40,  1.93it/s] 56%|█████▋    | 101/179 [00:50<00:38,  2.02it/s] 57%|█████▋    | 102/179 [00:51<00:39,  1.96it/s] 58%|█████▊    | 103/179 [00:51<00:40,  1.90it/s] 58%|█████▊    | 104/179 [00:52<00:37,  1.98it/s] 59%|█████▊    | 105/179 [00:52<00:35,  2.10it/s] 59%|█████▉    | 106/179 [00:53<00:33,  2.17it/s] 60%|█████▉    | 107/179 [00:53<00:34,  2.08it/s] 60%|██████    | 108/179 [00:54<00:33,  2.09it/s] 61%|██████    | 109/179 [00:54<00:33,  2.06it/s] 61%|██████▏   | 110/179 [00:55<00:33,  2.05it/s]                                                 {'loss': '0.01456', 'grad_norm': '0.1187', 'learning_rate': '6.979e-05', 'entropy': '0.01694', 'num_tokens': '4.096e+05', 'mean_token_accuracy': '0.9934', 'epoch': '0.6145'}
+ 61%|██████▏   | 110/179 [00:55<00:33,  2.05it/s] 62%|██████▏   | 111/179 [00:55<00:32,  2.09it/s] 63%|██████▎   | 112/179 [00:56<00:32,  2.09it/s] 63%|██████▎   | 113/179 [00:56<00:31,  2.12it/s] 64%|██████▎   | 114/179 [00:56<00:30,  2.12it/s] 64%|██████▍   | 115/179 [00:57<00:31,  2.03it/s] 65%|██████▍   | 116/179 [00:57<00:30,  2.05it/s] 65%|██████▌   | 117/179 [00:58<00:30,  2.05it/s] 66%|██████▌   | 118/179 [00:58<00:29,  2.04it/s] 66%|██████▋   | 119/179 [00:59<00:29,  2.05it/s] 67%|██████▋   | 120/179 [00:59<00:28,  2.09it/s]                                                 {'loss': '0.01462', 'grad_norm': '0.1196', 'learning_rate': '5.316e-05', 'entropy': '0.0182', 'num_tokens': '4.456e+05', 'mean_token_accuracy': '0.9937', 'epoch': '0.6704'}
+ 67%|██████▋   | 120/179 [00:59<00:28,  2.09it/s] 68%|██████▊   | 121/179 [01:00<00:28,  2.00it/s] 68%|██████▊   | 122/179 [01:00<00:27,  2.06it/s] 69%|██████▊   | 123/179 [01:01<00:28,  1.99it/s] 69%|██████▉   | 124/179 [01:01<00:26,  2.04it/s] 70%|██████▉   | 125/179 [01:02<00:26,  2.01it/s] 70%|███████   | 126/179 [01:02<00:25,  2.04it/s] 71%|███████   | 127/179 [01:03<00:24,  2.09it/s] 72%|███████▏  | 128/179 [01:03<00:25,  2.03it/s] 72%|███████▏  | 129/179 [01:04<00:25,  1.96it/s] 73%|███████▎  | 130/179 [01:04<00:25,  1.91it/s]                                                 {'loss': '0.01152', 'grad_norm': '0.1405', 'learning_rate': '3.806e-05', 'entropy': '0.01443', 'num_tokens': '4.829e+05', 'mean_token_accuracy': '0.9952', 'epoch': '0.7263'}
+ 73%|███████▎  | 130/179 [01:04<00:25,  1.91it/s] 73%|███████▎  | 131/179 [01:05<00:25,  1.90it/s] 74%|███████▎  | 132/179 [01:06<00:24,  1.91it/s] 74%|███████▍  | 133/179 [01:06<00:23,  1.95it/s] 75%|███████▍  | 134/179 [01:06<00:22,  2.00it/s] 75%|███████▌  | 135/179 [01:07<00:21,  2.02it/s] 76%|███████▌  | 136/179 [01:07<00:20,  2.05it/s] 77%|███████▋  | 137/179 [01:08<00:20,  2.02it/s] 77%|███████▋  | 138/179 [01:08<00:19,  2.10it/s] 78%|███████▊  | 139/179 [01:09<00:19,  2.08it/s] 78%|███████▊  | 140/179 [01:09<00:19,  1.97it/s]                                                 {'loss': '0.01186', 'grad_norm': '0.08562', 'learning_rate': '2.497e-05', 'entropy': '0.01467', 'num_tokens': '5.199e+05', 'mean_token_accuracy': '0.995', 'epoch': '0.7821'}
+ 78%|███████▊  | 140/179 [01:09<00:19,  1.97it/s] 79%|███████▉  | 141/179 [01:10<00:19,  1.99it/s] 79%|███████▉  | 142/179 [01:10<00:18,  1.98it/s] 80%|███████▉  | 143/179 [01:11<00:17,  2.01it/s] 80%|████████  | 144/179 [01:11<00:17,  1.98it/s] 81%|████████  | 145/179 [01:12<00:17,  1.89it/s] 82%|████████▏ | 146/179 [01:13<00:17,  1.84it/s] 82%|████████▏ | 147/179 [01:13<00:16,  1.90it/s] 83%|████████▎ | 148/179 [01:14<00:16,  1.88it/s] 83%|████████▎ | 149/179 [01:14<00:15,  1.93it/s] 84%|████████▍ | 150/179 [01:15<00:14,  1.98it/s]                                                 {'loss': '0.0104', 'grad_norm': '0.1297', 'learning_rate': '1.431e-05', 'entropy': '0.014', 'num_tokens': '5.577e+05', 'mean_token_accuracy': '0.9953', 'epoch': '0.838'}
+ 84%|████████▍ | 150/179 [01:15<00:14,  1.98it/s] 84%|████████▍ | 151/179 [01:15<00:14,  2.00it/s] 85%|████████▍ | 152/179 [01:16<00:13,  1.98it/s] 85%|████████▌ | 153/179 [01:16<00:13,  1.93it/s] 86%|████████▌ | 154/179 [01:17<00:12,  1.96it/s] 87%|████████▋ | 155/179 [01:17<00:11,  2.07it/s] 87%|████████▋ | 156/179 [01:18<00:11,  2.05it/s] 88%|████████▊ | 157/179 [01:18<00:10,  2.10it/s] 88%|████████▊ | 158/179 [01:19<00:10,  2.02it/s] 89%|████████▉ | 159/179 [01:19<00:09,  2.06it/s] 89%|████████▉ | 160/179 [01:20<00:09,  2.01it/s]                                                 {'loss': '0.01083', 'grad_norm': '0.1816', 'learning_rate': '6.449e-06', 'entropy': '0.01491', 'num_tokens': '5.94e+05', 'mean_token_accuracy': '0.9955', 'epoch': '0.8939'}
+ 89%|████████▉ | 160/179 [01:20<00:09,  2.01it/s] 90%|████████▉ | 161/179 [01:20<00:09,  1.97it/s] 91%|█████████ | 162/179 [01:21<00:08,  2.05it/s] 91%|█████████ | 163/179 [01:21<00:07,  2.06it/s] 92%|█████████▏| 164/179 [01:22<00:07,  1.96it/s] 92%|█████████▏| 165/179 [01:22<00:07,  1.91it/s] 93%|█████████▎| 166/179 [01:23<00:06,  1.97it/s] 93%|█████████▎| 167/179 [01:23<00:06,  1.92it/s] 94%|█████████▍| 168/179 [01:24<00:05,  1.89it/s] 94%|█████████▍| 169/179 [01:24<00:05,  1.89it/s] 95%|█████████▍| 170/179 [01:25<00:04,  1.90it/s]                                                 {'loss': '0.01059', 'grad_norm': '0.1078', 'learning_rate': '1.626e-06', 'entropy': '0.01266', 'num_tokens': '6.333e+05', 'mean_token_accuracy': '0.996', 'epoch': '0.9497'}
+ 95%|█████████▍| 170/179 [01:25<00:04,  1.90it/s] 96%|█████████▌| 171/179 [01:25<00:04,  1.95it/s] 96%|█████████▌| 172/179 [01:26<00:03,  2.06it/s] 97%|█████████▋| 173/179 [01:26<00:02,  2.04it/s] 97%|█████████▋| 174/179 [01:27<00:02,  2.02it/s] 98%|█████████▊| 175/179 [01:27<00:02,  1.96it/s] 98%|█████████▊| 176/179 [01:28<00:01,  1.90it/s] 99%|█████████▉| 177/179 [01:28<00:01,  1.98it/s] 99%|█████████▉| 178/179 [01:29<00:00,  1.89it/s]100%|██████████| 179/179 [01:29<00:00,  1.98it/s]                                                 {'train_runtime': '89.77', 'train_samples_per_second': '15.94', 'train_steps_per_second': '1.994', 'train_loss': '0.07437', 'entropy': '0.01269', 'num_tokens': '6.664e+05', 'mean_token_accuracy': '0.9967', 'epoch': '1'}
+100%|██████████| 179/179 [01:29<00:00,  1.98it/s]100%|██████████| 179/179 [01:29<00:00,  1.99it/s]
+trained 179 steps in 90s; final loss 0.074
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+adapter disabled -> first tokens match the baseline arm on 10/10 items (fp16 batch noise can cost one or two)
+**Trained** 179 steps in 90 s on NVIDIA GeForce RTX 4090; final loss 0.074; adapter `a24b7ef6d2bc32f2` saved to `results/lora_adapter`; the loss first fell under 0.1 at step 30.
+**LoRA training loss** at the logged steps. A curve that is still falling at the end means one epoch was not enough.
+saved results/fig_loss_curve.png
+[sft] n=240 accepted=0.504 time=60s (0.25s/item) format_fail=0.00 hit_token_cap=0.00
+| arm | n | accepted | acc | 95% CI | in-train fams | held-out fams | trap recall | false refusal | format fail | Δ vs baseline [CI] | McNemar p |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline | 240 | 22 | 0.092 | [0.058, 0.129] | 0.100 | 0.075 | 0.23 | 0.21 | 0.05 | — | — |
+| fewshot | 240 | 37 | 0.154 | [0.108, 0.200] | 0.200 | 0.062 | 0.19 | 0.08 | 0.02 | +0.063 [+0.017, +0.108] | 0.017 |
+| pot | 240 | 15 | 0.062 | [0.033, 0.096] | 0.075 | 0.037 | 0.19 | 0.19 | 0.14 | -0.029 [-0.071, +0.013] | 0.23 |
+| sft | 240 | 121 | 0.504 | [0.442, 0.567] | 0.725 | 0.062 | 0.44 | 0.17 | 0.00 | +0.412 [+0.342, +0.483] | 1.1e-22 |
+| family | n | baseline | fewshot | pot | sft |
+|---|---|---|---|---|---|
+| dilute_stock | 40 | 0.07 (3/40) | 0.65 (26/40) | 0.10 (4/40) | 0.75 (30/40) |
+| serial_dilution | 40 | 0.10 (4/40) | 0.00 (0/40) | 0.07 (3/40) | 0.80 (32/40) |
+| master_mix | 40 | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) | 0.72 (29/40) |
+| normalize_samples (held-out) | 40 | 0.15 (6/40) | 0.12 (5/40) | 0.07 (3/40) | 0.12 (5/40) |
+| well_addressing | 40 | 0.23 (9/40) | 0.15 (6/40) | 0.12 (5/40) | 0.62 (25/40) |
+| labware_fit (held-out) | 40 | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) |
+Effective floor (strongest non-solving control): **0.200**. Margin over the floor is acc − floor; the normalised position is (acc − floor)/(1 − floor).
+- `baseline`: acc 0.092, margin -0.108, normalised -0.135; errors wrong_value 130, feasibility 76, format 12
+- `fewshot`: acc 0.154, margin -0.046, normalised -0.057; errors wrong_value 145, feasibility 54, format 4
+- `pot`: acc 0.062, margin -0.138, normalised -0.172; errors wrong_value 119, feasibility 72, format 34
+- `sft`: acc 0.504, margin +0.304, normalised +0.380; errors feasibility 60, wrong_value 59
+**Headline.** baseline 0.092 → sft 0.504 [0.442, 0.567] on n = 240 items; delta +0.412 [0.342, 0.483], McNemar p < 0.001. Arms above the always-refuse floor (0.200): `sft`.
+
+**SFT learned the trained procedures and transferred nothing.** In the trained families SFT solves 100/128 feasible items where the baseline solved 11. On the 80 held-out items no arm, SFT included, solves a single feasible item (0/64). Held-out trap refusals: baseline 6/16, fewshot 5/16, pot 3/16, sft 5/16. The always-refuse policy scores 0.200 on the held-out items; every arm sits below it there. SFT emits exactly the schema's keys on 80/80 held-out items, so the failure is content, not format. The held-out design did its job: it separated procedure from template, and the answer on this run was template.
+
+**SFT's `feasible` flag:** refuses 21/48 traps against 33/192 feasible items (p < 0.001); the flag carries information: it refuses traps more often than feasible items.
+
+**Paired against the baseline**, SFT wins 108 items and loses 9 (p < 0.001); wins by family: serial_dilution 32, master_mix 29, dilute_stock 28, well_addressing 17, normalize_samples 2; losses by family: serial_dilution 4, normalize_samples 3, dilute_stock 1, well_addressing 1; held-out wins: 2 (17 of all wins are trap refusals).
+
+**Training:** 179 steps, final loss 0.074; the loss first fell under 0.1 at step 30.
+**Acceptance by arm and by family.** Left: acceptance with 95 % bootstrap CI and the always-refuse floor. Right: per family; the two held-out families are the last two rows.
+saved results/figure.png
+**Paired item transitions baseline → sft.** Items the second arm fixes point right; items it breaks point left. These discordant pairs are what the McNemar test counts.
+saved results/fig_transitions_sft.png
+**What the acceptances are.** In-train and held-out acceptance per arm, split into solved feasible items and refused traps. Transfer to a new family would show up as a solved-feasible segment in a held-out bar.
+saved results/fig_heldout_split.png
+====================================================================================================
+baseline
+--- [feasibility] dilute_stock-test-00000
+  gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+  pred: {"stock_ul": 80, "diluent_ul": 320, "feasible": true}
+  model output (tail): ```json ⏎ { ⏎   "stock_uL": 80, ⏎   "diluent_uL": 320, ⏎   "feasible": true ⏎ } ⏎ ```
+--- [feasibility] dilute_stock-test-00005
+  gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+  pred: {"stock_ul": 2.5, "diluent_ul": 97.5, "feasible": true}
+  model output (tail): ```json ⏎ { ⏎   "stock_uL": 2.5, ⏎   "diluent_uL": 97.5, ⏎   "feasible": true ⏎ } ⏎ ```
+--- [wrong_value] dilute_stock-test-00001
+  gold: {"stock_uL": 30.0, "diluent_uL": 270.0, "feasible": true}
+  pred: {"stock_ul": 60, "diluent_ul": 240, "feasible": true}
+  model output (tail): ```json ⏎ { ⏎   "stock_uL": 60, ⏎   "diluent_uL": 240, ⏎   "feasible": true ⏎ } ⏎ ```
+--- [wrong_value] dilute_stock-test-00002
+  gold: {"stock_uL": 125.0, "diluent_uL": 375.0, "feasible": true}
+  pred: {"stock_ul": 100, "diluent_ul": 400, "feasible": true}
+  model output (tail): ```json ⏎ { ⏎   "stock_uL": 100, ⏎   "diluent_uL": 400, ⏎   "feasible": true ⏎ } ⏎ ```
+--- [format] serial_dilution-test-00014
+  gold: {"carry_uL": 400.0, "diluent_per_well_uL": 800.0, "discard_uL": 400.0, "concentrations_ng_per_mL": [800.0, 266.667, 88.8889, 29.6296, 9.87654, 3.29218, 1.09739, 0.365798], "feasible": true}
+  pred: None
+  model output (tail): ```json ⏎ { ⏎   "carry_uL": 239.3, ⏎   "diluent_per_well_uL": 239.3 / 7, ⏎   "discard_uL": 239.3, ⏎   "concentrations_ng_per_mL": [800, 266.67, 83.33, 27.78, 8.9, 2.99, 0.998, 0.33], ⏎   "feasible": true ⏎ } ⏎ ```
+--- [format] serial_dilution-test-00035
+  gold: {"carry_uL": null, "diluent_per_well_uL": null, "discard_uL": null, "concentrations_ng_per_mL": null, "feasible": false}
+  pred: None
+  model output (tail): ```json ⏎ { ⏎   "carry_uL": 250, ⏎   "diluent_per_well_uL": 250, ⏎   "discard_uL": 250, ⏎   "concentrations_ng_per_mL": [2000, 500, 125, 31.25, 8.125, 2.04}, ⏎   "feasible": true ⏎ } ⏎ ```
+====================================================================================================
+fewshot
+--- [feasibility] dilute_stock-test-00000
+  gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+  pred: {"stock_ul": 0.8, "diluent_ul": 399.2, "feasible": true}
+  model output (tail): Stock 100 mM, target 0.2 mM (same unit). Final volume 400 µL = 400 µL. Dilution factor = C1/C2 = 100/0.2 = 500; by C1·V1 = C2·V2, stock volume V1 = V2/500 = 400/500 = 0.8 µL. Diluent = 400 − 0.8 = 399.2 µL. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": 0.8, "diluent_uL": 399.2, "feasible": true} ⏎ ```
+--- [feasibility] dilute_stock-test-00005
+  gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+  pred: {"stock_ul": 0.25, "diluent_ul": 99.75, "feasible": true}
+  model output (tail): Stock 10 X, target 0.025 X (1/40). Final volume 100 µL = 100 µL. Dilution factor = C1/C2 = 10/0.025 = 400; by C1·V1 = C2·V2, stock volume V1 = V2/400 = 100/400 = 0.25 µL. Diluent = 100 − 0.25 = 99.75 µL. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": 0.25, "diluent_uL": 99.75, "feasible": true} ⏎ ```
+--- [wrong_value] dilute_stock-test-00002
+  gold: {"stock_uL": 125.0, "diluent_uL": 375.0, "feasible": true}
+  pred: {"stock_ul": 2.0, "diluent_ul": 498.0, "feasible": true}
+  model output (tail): Stock 1 M, target 250 mM (same unit). Final volume 500 µL = 500 µL. Dilution factor = C1/C2 = 1/250; by C1·V1 = C2·V2, stock volume V1 = V2/250 = 500/250 = 2 µL. Diluent = 500 − 2 = 498 µL. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": 2.0, "diluent_uL": 498.0, "feasible": true} ⏎ ```
+--- [wrong_value] dilute_stock-test-00003
+  gold: {"stock_uL": 5.0, "diluent_uL": 45.0, "feasible": true}
+  pred: {"stock_ul": 500.0, "diluent_ul": 450.0, "feasible": true}
+  model output (tail): /mL, target 1000 µg/mL (1000 µg = 10 mg). Final volume 50 µL = 50 µL. Dilution factor = C1/C2 = 10/1000 = 0.01; by C1·V1 = C2·V2, stock volume V1 = V2/0.01 = 50/0.01 = 500 µL. Diluent = 500 − 50 = 450 µL. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": 500.0, "diluent_uL": 450.0, "feasible": true} ⏎ ```
+--- [format] serial_dilution-test-00017
+  gold: {"carry_uL": 150.0, "diluent_per_well_uL": 150.0, "discard_uL": 150.0, "concentrations_\u00b5g_per_mL": [5.0, 2.5, 1.25, 0.625, 0.3125, 0.15625, 0.078125, 0.0390625, 0.0195312, 0.00976562], "feasible"
+  pred: None
+  model output (tail): ume = 0.29296875 µL / 2 = 0.146484375 µL ⏎  ⏎ The final concentration in each well is calculated by dividing the diluent volume by the volume of the well (360 µL) and then multiplying by the top concentration (5 µg/mL): ⏎  ⏎ - Well A1: 5 µg/mL ⏎ - Well A2: (75 µL / 360 µL) * 5 µg/mL = 0.208333333 µg
+--- [format] master_mix-test-00026
+  gold: {"reactions_prepared": 55.2, "component_totals_uL": {"10X digest buffer": 55.2, "enzyme": 11.04}, "water_uL": 441.6, "feasible": true}
+  pred: None
+  model output (tail):  9.6 µL + 38.4 µL) = 552 µL - 558 µL = -6 µL (This is not possible, so we need to adjust the calculation) ⏎  ⏎ Let's correct the calculation: ⏎  ⏎ 480 µL + (480 µL × 15%) = 480 µL + 72 µL = 552 µL ⏎  ⏎ Now, let's recalculate the components: ⏎  ⏎ 1. Digest buffer: 10 µL × 48 = 480 µL ⏎ 2. Enzyme: 0.2
+====================================================================================================
+pot
+--- [feasibility] dilute_stock-test-00001
+  gold: {"stock_uL": 30.0, "diluent_uL": 270.0, "feasible": true}
+  pred: {"stock_ul": 600, "diluent_ul": -300, "feasible": false}
+  model output (tail): {"stock_uL": 600, "diluent_uL": -300, "feasible": false} ⏎ {"stock_uL": 600, "diluent_uL": -300, "feasible": false}
+--- [feasibility] dilute_stock-test-00005
+  gold: {"stock_uL": null, "diluent_uL": null, "feasible": false}
+  pred: {"stock_ul": 2.5, "diluent_ul": 97.5, "feasible": true}
+  model output (tail): {"stock_uL": 2.5, "diluent_uL": 97.5, "feasible": true} ⏎ {"stock_uL": 2.5, "diluent_uL": 97.5, "feasible": true}
+--- [wrong_value] dilute_stock-test-00002
+  gold: {"stock_uL": 125.0, "diluent_uL": 375.0, "feasible": true}
+  pred: {"stock_ul": 250, "diluent_ul": 250, "feasible": true}
+  model output (tail): {"stock_uL": 250, "diluent_uL": 250, "feasible": true} ⏎ {"stock_uL": 250, "diluent_uL": 250, "feasible": true}
+--- [wrong_value] dilute_stock-test-00003
+  gold: {"stock_uL": 5.0, "diluent_uL": 45.0, "feasible": true}
+  pred: {"stock_ul": 2.5, "diluent_ul": 47.5, "feasible": true}
+  model output (tail): {"stock_uL": 2.5, "diluent_uL": 47.5, "feasible": true} ⏎ {"stock_uL": 2.5, "diluent_uL": 47.5, "feasible": true}
+--- [format] serial_dilution-test-00012
+  gold: {"carry_uL": 150.0, "diluent_per_well_uL": 300.0, "discard_uL": 150.0, "concentrations_nM": [1000.0, 333.333, 111.111, 37.037, 12.3457, 4.11523, 1.37174, 0.457247, 0.152416], "feasible": true}
+  pred: None
+  model output (tail): ```python ⏎ { ⏎   "carry_uL": 2393, ⏎   "diluent_per_well_uL": 2393 / 8, ⏎   "discard_uL": 2393 - 300 * 8, ⏎   "concentrations_nM": [1000, 125, 125, 125, 125, 125, 125, 125, 125], ⏎   "feasible": true ⏎ } ⏎ ```
+--- [format] serial_dilution-test-00013
+  gold: {"carry_uL": 100.0, "diluent_per_well_uL": 200.0, "discard_uL": 100.0, "concentrations_\u00b5g_per_mL": [10.0, 3.33333, 1.11111, 0.37037, 0.123457, 0.0411523], "feasible": true}
+  pred: None
+  model output (tail): entrations_µg_per_mL": [10, 5, 2.5, 1.25, 0.625, 0.3125, 0.15625, 0.078125, 0.0390625, 0.01953125, 0.009765625, 0.0048828125, 0.00244140625, 0.001220703125, 0.0006103515625, 0.00030517578125, 0.000152587890625, 0.0000762939453125, 0.00003814697265625, 0.000019073486328125, 0.000009536743164062 ⏎ ```
+====================================================================================================
+sft
+--- [feasibility] dilute_stock-test-00002
+  gold: {"stock_uL": 125.0, "diluent_uL": 375.0, "feasible": true}
+  pred: {"stock_ul": null, "diluent_ul": null, "feasible": false}
+  model output (tail): 50 = 0.004; by C1·V1 = C2·V2, stock volume V1 = V2/0.004 = 500/0.004 = 125000 µL. Diluent = 500 − 125000 = -124900 µL; negative volume is not possible, so the solution cannot be made as stated: infeasible. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": null, "diluent_uL": null, "feasible": false} ⏎ ```
+--- [feasibility] dilute_stock-test-00003
+  gold: {"stock_uL": 5.0, "diluent_uL": 45.0, "feasible": true}
+  pred: {"stock_ul": null, "diluent_ul": null, "feasible": false}
+  model output (tail): ctor = C1/C2 = 10/1000 = 0.01; by C1·V1 = C2·V2, stock volume V1 = V2/0.01 = 50/0.01 = 5000 µL. Diluent = 50 − 5000 = -4950 µL; negative volume is not possible, so the target cannot be reached: infeasible. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": null, "diluent_uL": null, "feasible": false} ⏎ ```
+--- [wrong_value] dilute_stock-test-00018
+  gold: {"stock_uL": 7.5, "diluent_uL": 1492.5, "feasible": true}
+  pred: {"stock_ul": 1500.0, "diluent_ul": 500.0, "feasible": true}
+  model output (tail): Stock 10 mg/mL, target 50 ng/µL (same unit). Dilution factor = C1/C2 = 10/50 = 0.2; by C1·V1 = C2·V2, stock volume V1 = V2/0.2 = 1.5 mL = 1500 µL. Diluent = 1.5 mL − 1500 µL = 500 µL. ⏎  ⏎ Final answer: ⏎ ```json ⏎ {"stock_uL": 1500.0, "diluent_uL": 500.0, "feasible": true} ⏎ ```
+--- [wrong_value] dilute_stock-test-00029
+  gold: {"stock_uL": 20.0, "diluent_uL": 980.0, "feasible": true}
+  pred: {"stock_ul": 20.0, "diluent_ul": 0.98, "feasible": true}
+  model output (tail): Stock 50 mg/mL, target 1000 µg/mL (same unit). Dilution factor = C1/C2 = 50/1000 = 0.05; by C1·V1 = C2·V2, stock volume V1 = V2/0.05 = 1/0.05 = 20 µL. Diluent = 1 − 20/1000 = 0.98. Final answer: ⏎ ```json ⏎ {"stock_uL": 20.0, "diluent_uL": 0.98, "feasible": true} ⏎ ```
+wrote results/results.json
+**README-ready block** (copy into README section 4):
+| arm | n | accepted | acc | 95% CI | in-train fams | held-out fams | trap recall | false refusal | format fail | Δ vs baseline [CI] | McNemar p |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline | 240 | 22 | 0.092 | [0.058, 0.129] | 0.100 | 0.075 | 0.23 | 0.21 | 0.05 | — | — |
+| fewshot | 240 | 37 | 0.154 | [0.108, 0.200] | 0.200 | 0.062 | 0.19 | 0.08 | 0.02 | +0.063 [+0.017, +0.108] | 0.017 |
+| pot | 240 | 15 | 0.062 | [0.033, 0.096] | 0.075 | 0.037 | 0.19 | 0.19 | 0.14 | -0.029 [-0.071, +0.013] | 0.23 |
+| sft | 240 | 121 | 0.504 | [0.442, 0.567] | 0.725 | 0.062 | 0.44 | 0.17 | 0.00 | +0.412 [+0.342, +0.483] | 1.1e-22 |
+
+| family | n | baseline | fewshot | pot | sft |
+|---|---|---|---|---|---|
+| dilute_stock | 40 | 0.07 (3/40) | 0.65 (26/40) | 0.10 (4/40) | 0.75 (30/40) |
+| serial_dilution | 40 | 0.10 (4/40) | 0.00 (0/40) | 0.07 (3/40) | 0.80 (32/40) |
+| master_mix | 40 | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) | 0.72 (29/40) |
+| normalize_samples (held-out) | 40 | 0.15 (6/40) | 0.12 (5/40) | 0.07 (3/40) | 0.12 (5/40) |
+| well_addressing | 40 | 0.23 (9/40) | 0.15 (6/40) | 0.12 (5/40) | 0.62 (25/40) |
+| labware_fit (held-out) | 40 | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) |

@@ -1,26 +1,128 @@
 # %% [markdown]
-# # Liquid-handling plan reasoning: evaluate a 1.5B model, then improve it
+# # Liquid-handling plan reasoning: measure a 1.5B model, then improve it
 #
-# **What this notebook does.** It evaluates a small open model (`Qwen/Qwen2.5-1.5B-Instruct`) on 240
-# generated items that ask for the numbers and well addresses a liquid handler would execute (dilutions,
-# serial dilutions, master mixes, sample normalisation, well addressing, labware choice), then measures
-# three improvement arms on the *same* items with the *same* decoding:
+# A liquid handler executes whatever numbers and well addresses the planner emits. This notebook evaluates a
+# small open model (`Qwen/Qwen2.5-1.5B-Instruct`) on 240 generated reagent-prep and labware items, tries two
+# prompting interventions, then fine-tunes a LoRA on 1 431 generated traces and measures what it learned and
+# what it did not.
 #
 # | arm | what changes |
 # |---|---|
-# | `baseline` | zero-shot: intent + world facts + JSON schema; the model reasons freely and ends with JSON |
-# | `fewshot`  | two worked examples from the training families |
+# | `baseline` | zero-shot: intent + world facts + JSON schema; the model may reason freely and ends with JSON |
+# | `fewshot`  | two worked examples from the training families as prior turns |
 # | `pot`      | Program-of-Thought: the model writes Python that prints the JSON; a sandbox executes it |
-# | `sft`      | LoRA fine-tune on 1 431 generated items with reasoning traces (4 families); 2 families are held out |
+# | `sft`      | LoRA fine-tune on generated items with reasoning traces (4 families); 2 families are held out |
 #
-# Grading is programmatic (no LLM judge). Controls run before any model call. Every number is reported
-# with its n and a bootstrap CI; arms are compared with an exact McNemar test on paired items.
+# Grading is programmatic (no LLM judge). Controls run before any model call. Every acceptance carries its n and
+# a 95 % bootstrap CI; arms are compared with an exact McNemar test on paired items. **The numbers in the text
+# below are computed from this run**; a callout before the provenance section quotes the reference run so a
+# Colab result can be compared.
 #
-# **How to run.** Colab: *Runtime → Change runtime type → T4 GPU*, then *Run all* (about 35 min).
-# The same file runs as a plain script (`python notebook/prep_eval_colab.py`) with `SMOKE = True` on CPU.
+# **How to run.** Colab: *Runtime → Change runtime type → T4 GPU*, then *Run all* (about 35 min). The same file
+# runs as a plain script (`python notebook/prep_eval_colab.py`); `PREPEVAL_SMOKE=1` runs a tiny version of every
+# cell with a 0.5B model.
 
 # %% [markdown]
-# ## 0. Configuration
+# ## 1. Why this capability matters
+#
+# Every `transfer`, `serial_dilute`, `normalize` and master-mix step in a protocol compiler bottoms out in the
+# same arithmetic and the same addressing: stock and diluent volumes, carry volumes, per-well concentrations,
+# well lists, container choice. A wrong number here is a wrong plate, and the robot gives no warning.
+#
+# The task has a second half that matters as much as the first: recognising that a request cannot be carried
+# out as stated (a stock volume under the pipette minimum, a series that would overflow the wells, a sample
+# already below the target concentration). A planner that complies with every request is as dangerous as one
+# that refuses every request.
+#
+# Failures are legible: a unit slip, an inverted dilution factor, a miscounted well block. That makes the
+# capability a good eval target: the score says how often the model is right and the error class says why it
+# is wrong.
+#
+# No public dataset of wet-lab calculation problems with numeric ground truth exists (the nearest are
+# college-chemistry sets such as SciBench and ChemistryQA, and LAB-Bench ProtocolQA, which is multiple-choice
+# troubleshooting). The items are therefore generated, seeded and leak-checked, with PyLabRobot supplying
+# labware facts and well addressing.
+
+# %% [markdown]
+# ## 2. Why a small model
+#
+# A frontier model would clear these items on first contact. The question this notebook asks is different:
+# can a model small enough to live on the instrument do the job, and what does it take to get it there. Four
+# reasons to want that:
+#
+# 1. **On-instrument and offline deployment.** The planner runs on the instrument PC next to the driver. Many
+#    labs are air-gapped or under GxP change control, where every network dependency in the run loop is a
+#    validation item. A 1.5B model in fp16 is about 3 GB of weights and runs on a workstation GPU, or on CPU
+#    for low volumes.
+# 2. **Latency and cost per protocol step.** A protocol has hundreds of planning steps per run and a fleet
+#    multiplies that. Each call has to return in well under a second and cost close to nothing. Section 5
+#    prints the measured seconds per item for this run.
+# 3. **Ownership and fine-tunability.** The weights are yours. You can pin a version, hash it into the run
+#    record, audit it, and fine-tune it on your own procedures. A model behind an API can change between
+#    validation and production; a pinned checkpoint cannot. Section 7 trains a small adapter in minutes and
+#    records its hash.
+# 4. **Data privacy and IP.** Protocols, reagent identities, concentrations and sample metadata are the lab's
+#    IP and often its patients' data. With a local model none of it leaves the site.
+#
+# The price of all four is capability. Sections 3 to 5 measure that price; sections 6 to 8 test how much of
+# it a short fine-tune buys back.
+
+# %% [markdown]
+# ## 3. What goes wrong with small models on this task
+#
+# These are the failure modes the eval is built to separate. Each is stated here as an expectation; sections
+# 5 and 8 report whether it held on this run, with counts.
+#
+# - **Answering without working.** Asked for a JSON object, a small instruct model tends to emit the object
+#   and nothing else, even when the system message invites it to work through the arithmetic. A direct answer
+#   to a multi-step calculation is a guess with a format.
+# - **Arithmetic and unit slips.** Inverted dilution factors (dividing by C2/C1), raw numerals divided across
+#   different units, a factor of 1 000 lost between mg/mL and ng/µL, a negative diluent volume written down
+#   without comment.
+# - **Refusals that carry no information.** The schema offers a `feasible` flag. A small model tends to
+#   refuse at the same rate on feasible and infeasible requests, so its refusals are noise. A constant
+#   always-refuse policy then scores higher than the model, because it collects every trap by accident.
+# - **Template over procedure.** Shown one worked example, the model copies that example's trace skeleton
+#   onto every item, including items from other families where the skeleton is wrong. After fine-tuning on
+#   four task types it may reproduce a trained skeleton on task types it never saw.
+# - **Code that is not a program.** Asked to write Python, the model writes a JSON dict inside a Python
+#   fence, with `true` and `false` spelled as JSON and arithmetic left unevaluated, or it runs past the token
+#   budget mid-expression.
+# - **Format fragility.** Expressions inside JSON values (`239.3 / 7`), an unclosed bracket, a repetition loop
+#   that runs to the cap.
+#
+# The eval records, per item, the error class (`format`, `feasibility`, `wrong_value`), the predicted
+# `feasible` flag, the sandbox outcome for code, and whether the token cap was hit, so each failure mode above
+# can be counted rather than guessed at.
+
+# %% [markdown]
+# ## 4. How the eval is built
+#
+# Each item states a task in a scientist's words. A `World:` block carries every number the task needs: stock
+# concentrations, container geometry, pipette minimum, lab policies. The question asks for one JSON object
+# with fixed keys. The prompt never names the check that makes an item infeasible; the only affordance is the
+# `feasible` key in the schema.
+#
+# The grader holds the answer key: a programmatic gold per item, a kind-specific rule per field (volumes within
+# max(0.05 µL, 1 %), concentrations within 1 %, counts exact, well lists exact as sets, container choice exact),
+# and one error class per failure. An item is accepted only if every required field passes; an infeasible item
+# is graded on the flag alone.
+#
+# Six families, 40 seeds each; every fifth seed is an infeasible trap, so a model that always complies and one
+# that always refuses both fail. Two families (`normalize_samples`, `labware_fit`) are held out of all training
+# so that learning a procedure and memorising a template can be told apart.
+#
+# | family | the model must produce | trap | ground truth |
+# |---|---|---|---|
+# | `dilute_stock` | stock and diluent µL for a target concentration and volume, across unit changes | target above stock; stock volume below the pipette minimum | arithmetic |
+# | `serial_dilution` | carry volume, diluent per well, discard, every well's concentration | wells would overflow | arithmetic + PyLabRobot well capacity |
+# | `master_mix` | per-component totals for N reactions with the stated excess, water to volume | recipe does not fit the reaction volume | arithmetic |
+# | `normalize_samples` (held out) | per-sample sample and diluent volumes to a common concentration and minimum volume | a sample already below target | outcome-graded arithmetic |
+# | `well_addressing` | expand `B2:D5`; well at column-major index k; the 8 wells under an 8-channel head; 96→384 quadrant | off-plate addresses | PyLabRobot |
+# | `labware_fit` (held out) | plate vs deep-well vs trough for a volume and channel pattern; plates needed; trough load | nothing fits | PyLabRobot labware + arithmetic |
+
+# %% [markdown]
+# ### 4.1 Configuration
 
 # %%
 import os
@@ -41,10 +143,9 @@ OUT_DIR = "results"
 PROBE_N = 8 if SMOKE else 40
 
 # %% [markdown]
-# ## 1. Environment (Colab installs; local runs assume the repo venv)
+# ### 4.2 Environment (Colab installs; local runs assume the repo venv)
 
 # %%
-import importlib
 import subprocess
 
 IN_COLAB = "google.colab" in sys.modules
@@ -79,6 +180,7 @@ from prepeval import dataset as D
 from prepeval import families as F
 from prepeval import grading as G
 from prepeval import prompts as P
+from prepeval import readings as RD
 from prepeval import sandbox as S
 from prepeval import stats as ST
 
@@ -86,15 +188,73 @@ torch.manual_seed(SEED)
 np.random.seed(SEED)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float16 if device == "cuda" else torch.float32
+device_name = torch.cuda.get_device_name(0) if device == "cuda" else "CPU"
 print(f"device={device} dtype={dtype} torch={torch.__version__} python={sys.version.split()[0]}")
 if device == "cuda":
-  print(torch.cuda.get_device_name(0), f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GB")
+  print(device_name, f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GB")
+
+# %%
+# Display layer: rendered Markdown and inline figures in a kernel (Colab, Jupyter, %run); plain text and PNG files
+# as a script. The backend decision has to happen before the first pyplot import, so prepeval.figures is imported here.
+import io
+
+try:
+  from IPython import get_ipython
+
+  _ip = get_ipython()
+except ImportError:  # the plain-script venv has no IPython
+  _ip = None
+IN_KERNEL = _ip is not None and hasattr(_ip, "kernel")
+
+import matplotlib
+
+if not IN_KERNEL:
+  matplotlib.use("Agg")  # headless; in a kernel leave the inline backend alone
+import matplotlib.pyplot as plt
+
+from prepeval import figures as FIG
+
+if IN_KERNEL:
+  from IPython.display import Image, Markdown, display
+
+
+def show_md(text, code=False):
+  """Rendered Markdown in a kernel, plain text in a script log; code=True keeps the raw Markdown copyable."""
+  if IN_KERNEL:
+    display(Markdown(f"```markdown\n{text}\n```" if code else text))
+  else:
+    print(text)
+
+
+def out_name(stem):
+  return os.path.join(OUT_DIR, ("smoke-" if SMOKE else "") + stem)
+
+
+def show_fig(fig, path, width_px=None):
+  """Save the figure to `path`, show the same PNG inline in a kernel, then close it (one render, no leak)."""
+  if fig is None:
+    show_md("_Figure skipped: nothing to draw for this run._")
+    return None
+  buf = io.BytesIO()
+  fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+  with open(path, "wb") as fh:
+    fh.write(buf.getvalue())
+  if IN_KERNEL:
+    display(Image(data=buf.getvalue(), width=width_px or int(fig.get_figwidth() * 80)))
+  plt.close(fig)
+  print("saved", path)
+  return path
+
+
+print("display:", "kernel (inline figures)" if IN_KERNEL else "script (figures saved to files)")
 
 # %% [markdown]
-# ## 2. Data: the committed, seeded item files
+# ### 4.3 The items
 #
-# The item files were generated by `prepeval.dataset` (PyLabRobot supplied the labware facts and the well
-# addressing ground truth at generation time). Loading them here, rather than regenerating, pins the eval.
+# The item files are committed and loaded, not regenerated, so the eval is pinned. `data/manifest.json` carries
+# their SHA-256, the PyLabRobot commit and the build-time leak check (no test prompt in train, held-out families
+# absent from train, no gold value printed in its own prompt except values the item gives by construction, no
+# few-shot value in a test gold). Below: the composition of this run's test set and one item in full.
 
 # %%
 manifest = json.load(open("data/manifest.json"))
@@ -115,20 +275,20 @@ def first_n_per_family(items, n):
 
 test = first_n_per_family(test_all, N_PER_FAMILY)
 train = train_all if SFT_TRAIN_ITEMS is None else train_all[:: max(1, len(train_all) // SFT_TRAIN_ITEMS)][:SFT_TRAIN_ITEMS]
-print(f"test items: {len(test)}  (families: {dict(Counter(it.family for it in test))})")
-print(f"train items: {len(train)}  held-out families (never in train): {F.HELDOUT_FAMILIES}")
-print(f"infeasible (trap) share in test: {np.mean([not it.feasible for it in test]):.2f}")
-print("leak check at build time:", manifest["leak_check"])
+show_md(RD.render_items_line(test, train_all, manifest) + f" Held-out families (never in train): {', '.join(f'`{f}`' for f in F.HELDOUT_FAMILIES)}.")
 print("\nExample item\n" + "-" * 80 + "\n" + test[0].prompt + "\n" + "-" * 80 + "\ngold: " + json.dumps(test[0].gold))
 
 # %% [markdown]
-# ## 3. Controls (before any model call)
+# ### 4.4 Grading and controls
 #
-# 1. gold answers must all be accepted; 2. every single-field corruption of a gold must be rejected;
-# 3. a *program* that prints the gold must pass through sandbox + extractor + grader (the PoT path);
-# 4. constant policies (`always feasible, zeros` / `always infeasible`) define the floor;
-# 5. the leak check from the build (no test prompt in train, held-out families absent, no gold value printed
-#    in its own prompt, no few-shot value in a test gold).
+# Before any model call the grader is checked against itself: every gold must be accepted; every single-field
+# corruption of a gold (+3 % beyond tolerance, ×1000 unit slip, flipped flag, dropped or shifted well, other
+# container) must be rejected; a program that prints the gold must pass through sandbox, extractor and grader;
+# two constant policies set the floor.
+#
+# The strongest non-solving control is the **effective floor**. With a 20 % trap share the always-infeasible
+# policy scores 0.200. Any arm below that number is doing less than a policy that never computes anything;
+# this matters in section 5.
 
 # %%
 controls = {}
@@ -145,19 +305,23 @@ controls["policy_always_feasible_zeros"] = sum(G.grade(it, G.policy_always_feasi
 controls["policy_always_infeasible"] = sum(G.grade(it, G.policy_always_infeasible(it)).accepted for it in test) / len(test)
 controls["leak_check_pass"] = bool(manifest["leak_check"]["PASS"])
 controls["effective_floor"] = max(controls["policy_always_feasible_zeros"], controls["policy_always_infeasible"])
-print("| control | value | expected |\n|---|---|---|")
 exp = {"gold_accepted": "1.00", "mutations_rejected": "1.00", "gold_program_through_sandbox": "1.00",
        "policy_always_feasible_zeros": "0.00", "policy_always_infeasible": "= trap share", "leak_check_pass": "True",
        "effective_floor": "strongest non-solving control"}
-for k, v in controls.items():
-  print(f"| {k} | {v if isinstance(v, bool) else f'{v:.3f}'} | {exp[k]} |")
+rows = ["| control | value | expected |", "|---|---|---|"]
+rows += [f"| {k} | {v if isinstance(v, bool) else f'{v:.3f}'} | {exp[k]} |" for k, v in controls.items()]
+show_md("\n".join(rows))
+print(f"({len(muts)} single-field corruptions tested)")
 assert controls["gold_accepted"] == 1.0 and controls["mutations_rejected"] == 1.0 and controls["gold_program_through_sandbox"] == 1.0
 
 # %% [markdown]
-# ## 4. Model and a shared, deterministic generation setup
+# ### 4.5 Model and decoding
 #
-# One `GenerationConfig` for every arm: greedy, no repetition penalty (Qwen2.5's default `1.05` would
-# penalise re-emitting digits and JSON keys), left padding, own system message, prompt tokens sliced off.
+# One `GenerationConfig` for every arm: greedy, no repetition penalty (the checkpoint's own generation config
+# sets `repetition_penalty = 1.1`, which would penalise re-emitting digits and JSON keys), left padding, own
+# system message, prompt tokens sliced off. Token budgets:
+# 512 new tokens for baseline, few-shot and sft; 320 for PoT, which writes a short program. Whether an output
+# hit its cap is recorded per item.
 
 # %%
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
@@ -175,16 +339,16 @@ def load_base():
   return m.to(device).eval()
 
 
-MAX_LEN = 1024  # SFT sequence cap; the longest training row is ~785 tokens (checked here, before any GPU time is spent)
+MAX_LEN = 1024  # SFT sequence cap; the longest training row is 782 tokens (checked here, before any GPU time is spent)
 if "sft" in ARMS:
-  _lens = [len(tok(tok.apply_chat_template(P.messages_baseline(it), tokenize=False, add_generation_prompt=True) + P.sft_target(it))["input_ids"]) + 1 for it in train]
-  assert max(_lens) <= MAX_LEN, f"longest SFT row {max(_lens)} tokens > MAX_LEN={MAX_LEN}"
-  print(f"SFT rows fit: max {max(_lens)} tokens <= {MAX_LEN}")
+  train_lens = [len(tok(tok.apply_chat_template(P.messages_baseline(it), tokenize=False, add_generation_prompt=True) + P.sft_target(it))["input_ids"]) + 1 for it in train]
+  assert max(train_lens) <= MAX_LEN, f"longest SFT row {max(train_lens)} tokens > MAX_LEN={MAX_LEN}"
+  print(f"SFT rows fit: max {max(train_lens)} tokens <= {MAX_LEN}")
 
 model = load_base()
 import copy
 
-# A GenerationConfig passed to generate() replaces the model's own (which carries repetition_penalty=1.05
+# A GenerationConfig passed to generate() replaces the model's own (which carries repetition_penalty=1.1
 # and sampling defaults); greedy decoding with no repetition penalty is all we want.
 GEN = GenerationConfig(do_sample=False, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=50,
                        pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id)
@@ -217,9 +381,14 @@ def generate(model, messages_list, max_new_tokens, prefill="", stop_strings=None
   return outs
 
 
+def arm_cap(arm):
+  spec = P.ARMS[arm]
+  return spec["max_new_tokens"] if MAX_NEW_TOKENS_CAP is None else min(spec["max_new_tokens"], MAX_NEW_TOKENS_CAP)
+
+
 def run_arm(arm, model, items, tag=None):
   spec = P.ARMS[arm]
-  cap = spec["max_new_tokens"] if MAX_NEW_TOKENS_CAP is None else min(spec["max_new_tokens"], MAX_NEW_TOKENS_CAP)
+  cap = arm_cap(arm)
   msgs = [spec["messages"](it, fewshot) for it in items]
   t0 = time.time()
   if spec["tool"] == "python":
@@ -236,8 +405,8 @@ def run_arm(arm, model, items, tag=None):
     g = G.grade(it, graded_text)
     grades[it.id] = g
     records.append({"item_id": it.id, "family": it.family, "raw": out, "graded_text": graded_text if spec["tool"] else None,
-                    "sandbox": (run.status if run else None), "accepted": g.accepted, "error_class": g.error_class,
-                    "hit_token_cap": bool(hit_cap[len(records)])})
+                    "sandbox": (run.status if run else None), "sandbox_err": (run.stderr[:160] if run else None),
+                    "accepted": g.accepted, "error_class": g.error_class, "hit_token_cap": bool(hit_cap[len(records)])})
   acc = np.mean([g.accepted for g in grades.values()])
   print(f"[{tag or arm}] n={len(items)} accepted={acc:.3f} time={elapsed:.0f}s "
         f"({elapsed / len(items):.2f}s/item) format_fail={np.mean([g.error_class == 'format' for g in grades.values()]):.2f} "
@@ -246,11 +415,11 @@ def run_arm(arm, model, items, tag=None):
 
 
 # %% [markdown]
-# ## 5. Probe: is the eval in the model's working range?
+# ### 4.6 Probe: is the eval in the model's working range?
 #
-# Arm `baseline` on the first few items. If this were > 0.7 the set would be too easy for the model and
-# if it were ~0 with mostly `format` failures the problem would be the output channel, not the reasoning.
-# (Sanity check only; the model is not swapped post hoc.)
+# Arm `baseline` on the first few items. If this were > 0.7 the set would be too easy for the model and if it
+# were ~0 with mostly `format` failures the problem would be the output channel, not the reasoning. (Sanity
+# check only; the model is not swapped post hoc.)
 
 # %%
 probe_items = first_n_per_family(test, max(1, PROBE_N // len(F.FAMILIES)))
@@ -258,7 +427,17 @@ pg, pr, _ = run_arm("baseline", model, probe_items, tag="probe")
 print("error classes:", dict(Counter(g.error_class for g in pg.values() if not g.accepted)))
 
 # %% [markdown]
-# ## 6. Arms A–C on the pristine model
+# ## 5. Eval results: the model as it ships, and two prompting levers
+#
+# Three arms on the pristine model, same items, same decoding. `baseline` is the direct question. `fewshot`
+# adds two worked examples (a dilution and a well block, both feasible, both from training families) as prior
+# turns. `pot` asks for one Python block that computes the answer; a subprocess sandbox executes it and the
+# text JSON is the fallback.
+#
+# Why each should help: worked examples give the model a trace to imitate; code moves arithmetic and well
+# enumeration into the interpreter so the model only has to set up the formula (PAL and Program-of-Thought
+# reported large gains on arithmetic word problems). The table and the paragraphs after it are computed from
+# this run.
 
 # %%
 grades_by_arm, records_by_arm, timing = {}, {}, {}
@@ -267,28 +446,86 @@ for arm in [a for a in ARMS if a != "sft"]:
 if "pot" in records_by_arm:
   print("sandbox outcomes (pot):", dict(Counter(r["sandbox"] for r in records_by_arm["pot"])))
 
-# %% [markdown]
-# ## 7. LoRA fine-tune on the four training families
-#
-# Rows are prompt–completion pairs: the chat-templated prompt (with the assistant header) and the
-# programmatic reasoning trace + gold JSON. Loss on the completion only. fp16 autocast on the T4 with
-# fp32 adapters (PEFT default). Held-out families `normalize_samples` and `labware_fit` never appear.
+# %%
+caps = {a: arm_cap(a) for a in ARMS}
+summary_prompt = ST.summarize(test, grades_by_arm, baseline="baseline")
+R5 = RD.derive_readings(test, grades_by_arm, records_by_arm, summary_prompt, fewshot=fewshot, caps=caps)
+show_md(ST.results_table(summary_prompt))
+show_md(RD.render_prompting(summary_prompt, R5, controls, timing, caps, BATCH_SIZE, device_name, smoke=SMOKE))
 
 # %%
-lora_prov = None
+fams = list(summary_prompt["arms"]["baseline"]["per_family"])
+show_md("**Where the prompting arms fail.** One row per family, one panel per arm; each item is one of five outcomes.")
+show_fig(FIG.fig_outcomes(records_by_arm, test, arms=list(grades_by_arm), families=fams), out_name("fig_outcomes.png"))
+
+# %%
+show_md("**Does the `feasible` flag carry information, for the three prompting arms?** Refusal rate on feasible items (x) against "
+        "refusal rate on traps (y). A flag that tracks infeasibility sits above the diagonal; a flag that refuses at random sits on it. "
+        "The fine-tuned arm is added to this figure in section 8.")
+show_fig(FIG.fig_refusals(summary_prompt, R5), out_name("fig_refusals.png"))
+
+# %% [markdown]
+# *Reference run (RTX 4090, fp16, see the callout before the provenance section): baseline 0.092, fewshot 0.154,
+# pot 0.062, all under the 0.200 floor.*
+
+# %% [markdown]
+# ## 6. Training data
+#
+# The training rows come from the same generators as the test items, with disjoint seeds (1000 to 1374) and
+# only the four training families. `normalize_samples` and `labware_fit` never appear. Items whose prompt
+# duplicated a test prompt were dropped at build time.
+#
+# Each row is a prompt and a completion. The prompt is the baseline arm's chat-templated prompt. The
+# completion is a programmatic reasoning trace, a `Final answer:` line and the gold JSON. Traces are produced by
+# the code that produces the gold, so they are correct by construction, and on infeasible rows they name the
+# check that fails. One in five training rows is infeasible, the same share as the test set. Below: the
+# composition, the token lengths against the sequence cap, and one feasible and one infeasible completion (the
+# prompt half of each row is the baseline prompt shown in section 4.3).
+
+# %%
+lora_prov, lens, log_history, rows = None, [], [], []
+if "sft" in ARMS:
+  # completion ends without EOS: TRL appends the EOS token itself for prompt-completion rows
+  rows = [{"prompt": render(P.messages_baseline(it)), "completion": P.sft_target(it)} for it in train]
+  lens = [len(tok(r["prompt"] + r["completion"])["input_ids"]) + 1 for r in rows]
+  assert max(lens) <= MAX_LEN, f"longest training row {max(lens)} tokens > {MAX_LEN}: truncation would drop the JSON"
+  show_md(RD.render_rows_line(train, lens, MAX_LEN))
+  feas_row = next(r for it, r in zip(train, rows) if it.feasible)
+  trap_row = next((r for it, r in zip(train, rows) if not it.feasible), None)
+  print("A feasible training completion\n" + "-" * 80 + "\n" + feas_row["completion"][:600])
+  if trap_row:
+    print("\nAn infeasible training completion\n" + "-" * 80 + "\n" + trap_row["completion"][:600])
+
+# %%
+show_md("**Training rows fit under the sequence cap.** Completion-only loss sees every gold JSON only if no row is truncated.")
+show_fig(FIG.fig_train_lengths(lens, MAX_LEN), out_name("fig_train_lengths.png"))
+
+# %% [markdown]
+# ## 7. Training design
+#
+# LoRA, r = 16, alpha = 32, dropout 0.05, on the attention and MLP projections (q, k, v, o, gate, up, down):
+# about 18.5 M trainable parameters, 1.2 % of the model. Learning rate 2e-4 with a cosine schedule and 3 %
+# warmup; effective batch 8 (2 per device × 4 accumulation); one epoch; sequences capped at 1 024 tokens; loss
+# on the completion only; fp16 autocast with fp32 adapter weights.
+#
+# A fresh copy of the base model is loaded for training so the model that served section 5 is never mutated.
+# After training the adapter is saved with its SHA-256 prefix, merged into the weights, and the merged model is
+# evaluated with the baseline prompt and the baseline token budget. No prompt changes between the baseline and
+# sft arms.
+#
+# Why this recipe: it fits a free T4 in a few minutes, the adapter is small enough to pin and audit (section 2,
+# argument 3), and one epoch over 1 431 rows is enough to learn four procedures if they are learnable at all.
+# The loss curve below is read for one thing: whether the model stopped learning before the epoch ended.
+
+# %%
 if "sft" in ARMS:
   from datasets import Dataset
   from peft import LoraConfig, PeftModel, get_peft_model
   from trl import SFTConfig, SFTTrainer
 
-  # completion ends without EOS: TRL appends the EOS token itself for prompt-completion rows
-  rows = [{"prompt": render(P.messages_baseline(it)), "completion": P.sft_target(it)} for it in train]
-  lens = [len(tok(r["prompt"] + r["completion"])["input_ids"]) + 1 for r in rows]
-  assert max(lens) <= MAX_LEN, f"longest training row {max(lens)} tokens > {MAX_LEN}: truncation would drop the JSON"
-  print(f"SFT rows: {len(rows)}  token length: median {int(np.median(lens))}, max {max(lens)} (cap {MAX_LEN})")
   ds = Dataset.from_list(rows)
 
-  # a fresh base model for training: get_peft_model wraps in place, and the pristine model already served arms A-C
+  # a fresh base model for training: get_peft_model wraps in place, and the pristine model already served section 5
   del model
   gc.collect()
   if device == "cuda":
@@ -307,7 +544,8 @@ if "sft" in ARMS:
   n_steps = SFT_MAX_STEPS if SFT_MAX_STEPS > 0 else int(np.ceil(len(rows) / (per_device * accum)))
   cfg_kw = dict(output_dir=os.path.join(OUT_DIR, "smoke-sft_tmp" if SMOKE else "sft_tmp"), per_device_train_batch_size=per_device,
                 gradient_accumulation_steps=accum, learning_rate=2e-4, num_train_epochs=1,
-                max_steps=SFT_MAX_STEPS, lr_scheduler_type="cosine", warmup_steps=max(1, int(0.03 * n_steps)), logging_steps=10,
+                max_steps=SFT_MAX_STEPS, lr_scheduler_type="cosine", warmup_steps=max(1, int(0.03 * n_steps)),
+                logging_steps=1 if SMOKE else 10,
                 fp16=(device == "cuda"), bf16=False, report_to="none", save_strategy="no", seed=SEED,
                 gradient_checkpointing=False, max_length=MAX_LEN, packing=False, completion_only_loss=True,
                 dataset_num_proc=1, remove_unused_columns=True)
@@ -321,11 +559,18 @@ if "sft" in ARMS:
   t0 = time.time()
   train_out = trainer.train()
   timing["sft_train"] = time.time() - t0
-  print(f"trained {train_out.global_step} steps in {timing['sft_train']:.0f}s; final loss {train_out.training_loss:.3f}")
+  log_history = [dict(e) for e in trainer.state.log_history]
+  losses = [(e["step"], e["loss"]) for e in log_history if "loss" in e and "step" in e]
+  first_under = next((s for s, l in losses if l < 0.1), None)
+  last_logged = losses[-1][1] if losses else None
+  # train_out.training_loss is the Trainer's mean loss over the whole epoch, not the loss at the last step
+  print(f"trained {train_out.global_step} steps in {timing['sft_train']:.0f}s; mean training loss {train_out.training_loss:.3f}"
+        + (f" (last logged step loss {last_logged:.3f})" if last_logged is not None else ""))
   if not np.isfinite(train_out.training_loss):
     print("WARNING: non-finite training loss (fp16 overflow?) - the sft arm below is not trustworthy")
   lora_prov = {"r": 16, "alpha": 32, "targets": "attn+mlp", "train_items": len(rows), "steps": int(train_out.global_step),
-               "final_loss": float(train_out.training_loss), "lr": 2e-4, "effective_batch": per_device * accum, "max_length": MAX_LEN}
+               "mean_train_loss": float(train_out.training_loss), "last_logged_loss": last_logged, "lr": 2e-4,
+               "effective_batch": per_device * accum, "max_length": MAX_LEN, "loss_points": len(losses), "first_step_under_0_1": first_under}
 
   adapter_dir = os.path.join(OUT_DIR, "smoke-lora_adapter" if SMOKE else "lora_adapter")
   trainer.model.save_pretrained(adapter_dir)
@@ -335,7 +580,7 @@ if "sft" in ARMS:
   if device == "cuda":
     torch.cuda.empty_cache()
 
-  # Sanity: with the adapter disabled the model must reproduce the baseline outputs (same batch composition).
+  # Sanity: with the adapter disabled the wrapper should start its answers the way the baseline arm did.
   peft_model.eval()
   peft_model.config.use_cache = True
   check_items = test[:10]
@@ -347,32 +592,69 @@ if "sft" in ARMS:
 
   merged = peft_model.merge_and_unload().eval()
   merged.config.use_cache = True
-  grades_by_arm["sft"], records_by_arm["sft"], timing["sft"] = run_arm("sft", merged, test)
-  model = merged
-
-# %% [markdown]
-# ## 8. Results
-#
-# Headline: acceptance (every required field within tolerance) per arm with 95 % bootstrap CIs, the paired
-# delta against the baseline with its CI, and an exact McNemar p-value. Per-family numbers (n = 40 each)
-# are directional; the aggregate (n = 240) carries the claim. Held-out families show whether the LoRA
-# learned procedures or memorised templates.
+  show_md(f"**Trained** {lora_prov['steps']} steps in {timing['sft_train']:.0f} s on {device_name}; mean training loss over the "
+          f"epoch {RD.fmt_num(lora_prov['mean_train_loss'])}, last logged step loss {RD.fmt_num(last_logged)}; adapter "
+          f"`{lora_prov['adapter_sha256_16']}` saved to `{adapter_dir}`; "
+          + (f"the loss first fell under 0.1 at step {first_under}." if first_under else "the loss never fell under 0.1."))
 
 # %%
+show_md("**LoRA training loss** at the logged steps. A curve that is still falling at the end means one epoch was not enough.")
+show_fig(FIG.fig_loss_curve(log_history), out_name("fig_loss_curve.png"))
+
+# %% [markdown]
+# ## 8. Training result
+#
+# The fine-tuned model is evaluated on the same items with the baseline prompt. This section holds the complete
+# results table: all four arms, acceptance with 95 % bootstrap CI, in-train and
+# held-out acceptance, trap recall, false-refusal rate, format-failure rate, the paired delta against the
+# baseline and the exact McNemar p-value. Per-family cells (n = 40) are directional at about ±15 points; the
+# n = 240 aggregate carries the claim.
+#
+# Two questions decide what the fine-tune proved. Did it clear the always-refuse floor in the trained families.
+# Did any of it transfer to the two held-out families.
+
+# %%
+if "sft" in ARMS:
+  grades_by_arm["sft"], records_by_arm["sft"], timing["sft"] = run_arm("sft", merged, test)
+  model = merged
 summary = ST.summarize(test, grades_by_arm, baseline="baseline")
 summary["controls"] = controls
 summary["timing_s"] = timing
-print(ST.results_table(summary))
-print()
-print(ST.family_table(summary))
-print()
-print("effective floor (strongest non-solving control):", f"{controls['effective_floor']:.3f}")
-for arm, a in summary["arms"].items():
-  pos = (a["acc"] - controls["effective_floor"]) / (1 - controls["effective_floor"])
-  print(f"  {arm:9s} acc {a['acc']:.3f} -> position above floor {pos:+.3f}; errors {a['error_classes']}")
+R = RD.derive_readings(test, grades_by_arm, records_by_arm, summary, fewshot=fewshot, caps=caps)
+summary["readings"] = R
+show_md(ST.results_table(summary))
+show_md(ST.family_table(summary))
+show_md(RD.floor_lines(summary, controls))
+show_md(RD.render_sft(summary, R, controls, lora_prov, smoke=SMOKE))
+
+# %%
+show_md("**Acceptance by arm and by family.** Left: acceptance with 95 % bootstrap CI and the always-refuse floor. "
+        "Right: per family; the two held-out families are labelled (held-out).")
+show_fig(FIG.fig_acceptance(summary, controls), out_name("figure.png"))
+
+# %%
+arm_b = "sft" if "sft" in grades_by_arm else ("fewshot" if "fewshot" in grades_by_arm else None)
+if arm_b:
+  show_md(f"**Paired item transitions baseline → {arm_b}.** Items the second arm fixes point right; items it breaks point left. "
+          "These discordant pairs are what the McNemar test counts.")
+  show_fig(FIG.fig_transitions(grades_by_arm, test, "baseline", arm_b, families=fams, comparison=summary["comparisons"].get(arm_b)),
+           out_name(f"fig_transitions_{arm_b}.png"))
+
+# %%
+show_md("**What the acceptances are.** In-train and held-out acceptance per arm, split into solved feasible items and refused traps. "
+        "Transfer to a new family would show up as a solved-feasible segment in a held-out bar.")
+show_fig(FIG.fig_heldout_split(summary, R), out_name("fig_heldout_split.png"))
+
+# %%
+show_md("**Does the `feasible` flag carry information, after training?** Same axes as section 5 with the fine-tuned arm added. "
+        "A flag that tracks infeasibility sits above the diagonal.")
+show_fig(FIG.fig_refusals(summary, R), out_name("fig_refusals_all.png"))
 
 # %% [markdown]
-# ### Failure examples (three per error class per arm): reviewers trust examples more than CIs
+# ### Failure examples
+#
+# Reviewers trust examples more than CIs. Two per error class per arm; the full outputs are in
+# `results/raw_outputs.jsonl`.
 
 # %%
 for arm, recs in records_by_arm.items():
@@ -382,7 +664,7 @@ for arm, recs in records_by_arm.items():
       by_class[r["error_class"]].append(r)
   print("=" * 100 + f"\n{arm}")
   for cls, rs in by_class.items():
-    for r in rs[:3]:
+    for r in rs[:2]:
       it = next(i for i in test if i.id == r["item_id"])
       g = grades_by_arm[arm][it.id]
       shown = (r["graded_text"] or r["raw"]) if arm == "pot" else r["raw"]
@@ -390,64 +672,28 @@ for arm, recs in records_by_arm.items():
       print("  model output (tail): " + shown.strip().replace("\n", " ⏎ ")[-300:])
 
 # %% [markdown]
-# ### Figure: acceptance per arm (95 % bootstrap CI) and per family
-
-# %%
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-# palette: validated reference set (blue, orange, aqua, yellow in fixed order); recessive axes and grid
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
-MUTED, GRID, TEXT, TEXT2, SURFACE = "#898781", "#e1e0d9", "#0b0b0b", "#52514e", "#fcfcfb"
-arms = list(summary["arms"])
-fams = list(summary["arms"][arms[0]]["per_family"])
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2), gridspec_kw={"width_ratios": [1, 1.5]})
-fig.patch.set_facecolor(SURFACE)
-for ax in (ax1, ax2):
-  ax.set_facecolor(SURFACE)
-  for side in ("top", "right"):
-    ax.spines[side].set_visible(False)
-  for side in ("left", "bottom"):
-    ax.spines[side].set_color(GRID)
-  ax.tick_params(colors=MUTED, labelcolor=TEXT2, length=0)
-  ax.yaxis.grid(True, color=GRID, linewidth=1)
-  ax.set_axisbelow(True)
-# left: one bar per arm, single hue, CI whiskers, direct labels
-acc = [summary["arms"][a]["acc"] for a in arms]
-lo = [summary["arms"][a]["ci95"][0] for a in arms]
-hi = [summary["arms"][a]["ci95"][1] for a in arms]
-x = np.arange(len(arms))
-ax1.bar(x, acc, width=0.55, color=SERIES[0], edgecolor=SURFACE, linewidth=2)
-ax1.errorbar(x, acc, yerr=[np.array(acc) - np.array(lo), np.array(hi) - np.array(acc)], fmt="none", ecolor=TEXT2, elinewidth=1.5, capsize=4)
-for xi, a in zip(x, acc):
-  ax1.text(xi, min(a + 0.06, 1.02), f"{a:.2f}", ha="center", va="bottom", color=TEXT, fontsize=10)
-ax1.axhline(controls["effective_floor"], color=MUTED, linewidth=1, linestyle=(0, (4, 3)))
-ax1.text(len(arms) - 0.5, controls["effective_floor"] + 0.01, "effective floor", ha="right", va="bottom", color=TEXT2, fontsize=8)
-ax1.set_xticks(x, arms)
-ax1.set_ylim(0, 1.1)
-ax1.set_ylabel("accepted (all fields within tolerance)", color=TEXT2)
-ax1.set_title(f"Acceptance by arm, n = {summary['n_items']} items, 95 % CI", color=TEXT, fontsize=11, loc="left")
-# right: per-family dots, one colour per arm in fixed order, legend + table printed above
-y = np.arange(len(fams))
-for j, a in enumerate(arms):
-  vals = [summary["arms"][a]["per_family"][f]["acc"] for f in fams]
-  ax2.scatter(vals, y + (j - (len(arms) - 1) / 2) * 0.16, s=64, color=SERIES[j % len(SERIES)], edgecolor=SURFACE, linewidth=1.5, label=a, zorder=3)
-ax2.set_yticks(y, [f + (" (held-out)" if summary["arms"][arms[0]]["per_family"][f]["heldout"] else "") for f in fams])
-ax2.invert_yaxis()
-ax2.set_xlim(-0.02, 1.02)
-ax2.xaxis.grid(True, color=GRID, linewidth=1)
-ax2.yaxis.grid(False)
-ax2.set_xlabel("accepted", color=TEXT2)
-ax2.set_title("Per family (n = %d each; directional)" % summary["arms"][arms[0]]["per_family"][fams[0]]["n"], color=TEXT, fontsize=11, loc="left")
-leg = ax2.legend(frameon=False, loc="lower right", fontsize=9)
-for t in leg.get_texts():
-  t.set_color(TEXT2)
-plt.tight_layout()
-fig_path = os.path.join(OUT_DIR, "smoke-figure.png" if SMOKE else "figure.png")
-plt.savefig(fig_path, dpi=150, facecolor=SURFACE)
-print("saved", fig_path)
+# ### Reference run
+#
+# > **Reference run.** This notebook's code and data, RTX 4090, fp16, greedy, n = 240; timed phases 5 min 29 s
+# > (inference 3 min 59 s over the four arms, LoRA training 90 s), 6 min 20 s end to end on the shell clock
+# > including model loading and controls; artefacts committed under `results/reference/`.
+# > baseline 0.092 [0.058, 0.129]; fewshot 0.154 (+0.063, McNemar p = 0.017); pot 0.062 (−0.029, p = 0.23);
+# > sft 0.504 [0.442, 0.567] (+0.412, p = 1.1e-22).
+# > In-train / held-out acceptance: baseline 0.100 / 0.075, fewshot 0.200 / 0.062, pot 0.075 / 0.037,
+# > sft 0.725 / 0.062. Effective floor 0.200 (always-infeasible policy).
+# > Accepted per family, of 40 (baseline / fewshot / pot / sft): dilute_stock 3 / 26 / 4 / 30;
+# > serial_dilution 4 / 0 / 3 / 32; master_mix 0 / 0 / 0 / 29; well_addressing 9 / 6 / 5 / 25;
+# > normalize_samples (held out) 6 / 5 / 3 / 5; labware_fit (held out) 0 / 0 / 0 / 0.
+# > Token-cap hits 1 / 4 / 30 / 0. LoRA: 179 steps, 90 s, mean training loss over the epoch 0.074, last logged
+# > step loss 0.011, adapter `a24b7ef6d2bc32f2`.
+# > On that run all 240 baseline outputs were bare JSON; no arm solved a feasible held-out item; 24 of 25
+# > few-shot wins were in `dilute_stock`; all 24 rejected PoT programs were SyntaxErrors at the 320-token cap
+# > and 38 of 42 runtime errors were `true`/`false` written as JSON.
+# > A second run on the same GPU (the previous notebook version, same items and decoding) reproduced the three
+# > prompting arms exactly: identical acceptance, per-family and error-class counts. LoRA training did not
+# > reproduce: that fit scored 0.463 [0.400, 0.525] with the same mean training loss, so read the sft number as
+# > one draw; the two fits differ by about 0.04. No Colab T4 run has been made; one should land inside the
+# > intervals above.
 
 # %% [markdown]
 # ### Provenance and results file
@@ -468,7 +714,7 @@ provenance = {
   "transformers": transformers.__version__, "peft": peft.__version__, "trl": trl_v, "torch": torch.__version__,
   "dataset_sha256": manifest.get("sha256"), "generator_version": manifest["generator_version"], "plr_commit": manifest["plr_commit"],
   "prompt_sha256": {"system": hashlib.sha256(P.SYSTEM.encode()).hexdigest()[:16], "pot_system": hashlib.sha256(P.POT_SYSTEM.encode()).hexdigest()[:16]},
-  "decoding": {"greedy": True, "repetition_penalty": 1.0, "max_new_tokens": {a: P.ARMS[a]["max_new_tokens"] for a in ARMS}, "batch_size": BATCH_SIZE},
+  "decoding": {"greedy": True, "repetition_penalty": 1.0, "max_new_tokens": caps, "batch_size": BATCH_SIZE},
   "lora": lora_prov,
   "n_test_items": len(test), "smoke": SMOKE, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }
@@ -479,7 +725,28 @@ with open(os.path.join(OUT_DIR, "raw_outputs.jsonl" if not SMOKE else "smoke_raw
     for r in recs:
       fh.write(json.dumps({"arm": arm, **r}) + "\n")
 print("wrote", out_path)
-print("\nREADME-ready block:\n")
-print(ST.results_table(summary))
-print()
-print(ST.family_table(summary))
+show_md("**README-ready block** (copy into README section 4):")
+show_md(ST.results_table(summary) + "\n\n" + ST.family_table(summary), code=True)
+
+# %% [markdown]
+# ## 9. Future directions
+#
+# In the order they would change a conclusion above:
+#
+# 1. A zero-shot chain-of-thought baseline ("work step by step, then the JSON") so the reference arm reasons;
+#    on the reference run the baseline answered without working.
+# 2. One token budget for every arm (at least 512) and `true`, `false`, `null` defined in the PoT runner, so no
+#    arm is measured against its cap or its spelling.
+# 3. One infeasible few-shot exemplar, and few-shot reported across several exemplars on one item set; the
+#    current gain is confined to the exemplar's family and has not been separated from the item change.
+# 4. A second LoRA seed, and a five-train / one-held-out rotation so transfer is tested per family rather than
+#    on two fixed families.
+# 5. Grading by replaying the plan through PyLabRobot's volume trackers, so any correct construction passes in
+#    every family (today only `normalize_samples` is outcome-graded).
+# 6. A frontier reference arm to measure the ceiling instead of asserting it, and a GSM8K slice before and
+#    after the LoRA to show no general regression.
+# 7. A small real-text split from CC-BY protocol recipe tables, hand-checked, as a distribution-shift probe.
+# 8. A maj@5 self-consistency arm over executed programs, and SFT combined with PoT, once item 2 has made PoT a
+#    fair arm.
+# 9. Infeasibility discoverable from the world alone (drop the `feasible` key) with the refusal graded as free
+#    text.
