@@ -17,7 +17,7 @@ plain Python script on a CPU in smoke mode.
 | GPU box, full run as a script | `UV_TORCH_BACKEND=auto uv sync --all-extras && uv run python notebook/prep_eval_colab.py` (~35 min on a T4; writes `results/`) |
 | Build and tests (any box) | `UV_TORCH_BACKEND=cpu uv sync --all-extras && uv run pytest` |
 | Smoke run (CPU, 0.5B model, every code path; slow) | `PREPEVAL_SMOKE=1 uv run python notebook/prep_eval_colab.py` |
-| Rebuild the item files | `uv run python -m prepeval.dataset` (needs the `plr` extra once, for `labware.json`) |
+| Rebuild the item files | `uv run python -m prepeval.dataset` (uses the committed `labware.json`; regenerate that with `uv run python -m prepeval.labware`, which needs the `plr` extra) |
 
 ## 1. The capability
 
@@ -42,7 +42,9 @@ Why this one:
 
 240 test items, six families × 40 seeds, generated deterministically by `prepeval/families.py`. Exactly every
 fifth seed is an **infeasible trap** (20 %), so a model that always complies and one that always refuses both
-fail. Each family has three or four phrasings.
+fail. The four quantitative families have three intent phrasings each; `well_addressing` (four sub-tasks) and
+`labware_fit` (three) vary by sub-task instead, so in-family gains there may partly reflect template familiarity.
+The held-out families carry the generalisation claim.
 
 | family | the model must produce | trap | ground truth |
 |---|---|---|---|
@@ -66,24 +68,25 @@ PLR identifiers, only the facts. Trough "unreachable volume" is a stated lab pol
 ### Grading
 
 Programmatic, no LLM judge (`prepeval/grading.py`). The last JSON object in the completion is extracted
-(fenced, inline, or a Python dict literal). Volumes and concentrations must be within
-`max(0.05 µL, 1 %)`; counts exact; well lists exact as sets (`A01` ≡ `A1`); container choice exact. An item is
+(fenced, inline, or a Python dict literal; the last object carrying a `feasible` key wins). Volumes must be
+within `max(0.05 µL, 1 %)`, concentrations and reaction counts within 1 %; counts exact; well lists exact as
+sets (`A01` ≡ `A1`, a range such as `A5:H5` is expanded); container choice exact. An item is
 **accepted** only if every required field passes. For infeasible items only the `feasible` flag is graded: a
 specific refusal scores 1, acting anyway scores 0. Refusing a feasible item is a `feasibility` error. For
 `normalize_samples` any (sample, diluent) pair that reaches the target within tolerance, meets the minimum
-volume and respects the available volume passes (any correct construction is accepted). Every failure is
-classed as `format`, `feasibility` or `wrong_value`.
+volume, respects the available volume and keeps the sample volume at or above the pipette minimum passes (any
+correct construction is accepted). Every failure is classed as `format`, `feasibility` or `wrong_value`.
 
 ### Controls (run before any model call, in `pytest` and in the notebook)
 
 | control | expected |
 |---|---|
 | gold answers graded | 100 % accepted |
-| each gold corrupted one field at a time (±3 % beyond tolerance, ×1000 unit slip, flipped flag, dropped well) | 100 % rejected |
+| each gold corrupted one field at a time (+3 % beyond tolerance, ×1000 unit slip, flipped flag, dropped well) | 100 % rejected |
 | a *program* that prints the gold, through sandbox → extractor → grader | 100 % accepted |
 | constant policy "always feasible, zeros" | ≈ 0 |
 | constant policy "always infeasible" | = trap share (0.20) |
-| leak check at build time | no test prompt in train; held-out families absent from train; no non-trivial gold value printed in its own prompt (items that would are resampled); no few-shot value in a test gold |
+| leak check at build time | no test prompt in train; held-out families absent from train; no non-trivial gold value printed in its own prompt except values given by construction that must be recognised rather than derived (a series' final volume and top concentration, the 2-fold carry, well counts) — any other collision is resampled; no few-shot value in a test gold |
 
 The strongest non-solving control is the **effective floor**; arms are also reported as position above it.
 
@@ -92,8 +95,9 @@ The strongest non-solving control is the **effective floor**; arms are also repo
 Acceptance per arm with a 95 % bootstrap CI (10 000 resamples); paired delta against the baseline with its
 bootstrap CI and an exact McNemar test on discordant pairs; per-family acceptance (n = 40 each, directional)
 with held-out families marked; trap recall and false-refusal rate; format-failure rate; seconds per item.
-Decoding is greedy (`pass@1`) with one shared generation config for every arm. Harness failures are counted,
-not scored as zero.
+Decoding is greedy (`pass@1`) with one shared generation config for every arm. Sandbox outcomes (timeout,
+rejected import, runtime error) and token-cap hits are recorded per item so they can be told apart from
+reasoning failures.
 
 ## 3. The improvement scheme
 
@@ -104,7 +108,7 @@ Four arms on the same items, same decoding, same model (`Qwen/Qwen2.5-1.5B-Instr
 | `baseline` | zero-shot: intent + world + schema; the model reasons as it likes and ends with the JSON | the honest reference: instruct models already reason step by step |
 | `fewshot` | two worked examples from the training families (a dilution and a well block) | mostly format compliance; for Qwen2.5, worked examples add little reasoning |
 | `pot` | Program-of-Thought: the model writes one Python block that prints the JSON; a subprocess sandbox executes it; text JSON is the fallback | arithmetic and well enumeration move into the interpreter; the model only has to set up the formula (PAL/PoT: GSM-Hard 23 → 61 for CoT → code) |
-| `sft` | LoRA (r = 16, attention + MLP, one epoch, ~190 steps, ~6 min on T4) on ~1 440 generated items from four families, each with a programmatic reasoning trace and the gold JSON; evaluated with the baseline prompt | teaches the procedures; the two held-out families separate learned procedure from template memorisation |
+| `sft` | LoRA (r = 16, attention + MLP, one epoch = 179 steps at effective batch 8, ~6 min on T4) on 1 431 generated items from four families (375 seeds each; 69 `well_addressing` items whose prompt duplicated a test prompt were dropped), each with a programmatic reasoning trace and the gold JSON; evaluated with the baseline prompt | teaches the procedures; the two held-out families separate learned procedure from template memorisation |
 
 The fine-tune is honest only because of the split: training seeds are disjoint from test seeds, no training
 prompt equals a test prompt, and `normalize_samples` and `labware_fit` never appear in training. In-family
@@ -130,8 +134,8 @@ Per family (n = 40 each; directional):
 |---|---|---|---|---|
 | | | | | |
 
-A CPU smoke run (0.5B model, 4 items per family, 3 LoRA steps) is kept in `results/smoke-cpu.json` only as
-proof that every code path executes; its numbers are not results.
+Running `PREPEVAL_SMOKE=1 uv run python notebook/prep_eval_colab.py` writes `results/smoke-cpu.json` (0.5B
+model, 4 items per family, 3 LoRA steps) as a check that every code path executes; its numbers are not results.
 
 ## 5. What this does and does not show
 
@@ -159,10 +163,10 @@ prepeval/
   sandbox.py     Program-of-Thought executor: subprocess, AST filter, builtins whitelist, 2 s timeout
   dataset.py     deterministic splits, leak checks, manifest
   stats.py       bootstrap CI, exact McNemar, per-family tables, results JSON
-data/            test.jsonl (240), train.jsonl (~1 440), fewshot.jsonl (2), manifest.json (seeds, sha256, PLR commit)
+data/            test.jsonl (240), train.jsonl (1 431), fewshot.jsonl (2), manifest.json (seeds, sha256, PLR commit)
 notebook/        prep_eval_colab.py (jupytext percent source) and the built .ipynb
 tests/           hand-worked golds, grader controls, extraction cases, sandbox safety, PLR cross-check, leak checks
-results/         smoke-cpu.json (local); results.json, figure.png, raw_outputs.jsonl (Colab run)
+results/         written by runs, not committed: results.json, figure.png, raw_outputs.jsonl (GPU run); smoke-cpu.json (smoke run)
 ```
 
 ## 7. What I would do differently with more time

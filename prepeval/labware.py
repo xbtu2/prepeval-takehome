@@ -79,7 +79,7 @@ def regenerate_catalogue_from_plr() -> dict:
 
 
 def _display(kind: str, rows: int, cols: int, max_ul: float) -> str:
-  vol = f"{max_ul:g} uL"
+  vol = f"{max_ul:g} µL"
   if kind == "trough":
     return f"single-compartment trough, one shared liquid for all channels, max {vol}"
   return f"{rows * cols}-well {kind}, {rows} rows x {cols} columns, each well max {vol}"

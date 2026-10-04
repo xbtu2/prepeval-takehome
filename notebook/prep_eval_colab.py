@@ -11,7 +11,7 @@
 # | `baseline` | zero-shot: intent + world facts + JSON schema; the model reasons freely and ends with JSON |
 # | `fewshot`  | two worked examples from the training families |
 # | `pot`      | Program-of-Thought: the model writes Python that prints the JSON; a sandbox executes it |
-# | `sft`      | LoRA fine-tune on ~1 500 generated items with reasoning traces (4 families); 2 families are held out |
+# | `sft`      | LoRA fine-tune on 1 431 generated items with reasoning traces (4 families); 2 families are held out |
 #
 # Grading is programmatic (no LLM judge). Controls run before any model call. Every number is reported
 # with its n and a bootstrap CI; arms are compared with an exact McNemar test on paired items.
@@ -33,7 +33,7 @@ REPO_DIR = "prepeval-takehome"
 N_PER_FAMILY = 4 if SMOKE else 40  # 40 -> 240 test items
 ARMS = ["baseline", "fewshot", "pot", "sft"]
 BATCH_SIZE = 2 if SMOKE else 16  # 32 halves inference time on a T4 if the budget is tight
-SFT_MAX_STEPS = 3 if SMOKE else -1  # -1 = one epoch (~190 steps)
+SFT_MAX_STEPS = 3 if SMOKE else -1  # -1 = one epoch (179 steps at effective batch 8)
 SFT_TRAIN_ITEMS = 16 if SMOKE else None  # None = all
 MAX_NEW_TOKENS_CAP = 96 if SMOKE else None  # None = the arm's own cap
 SEED = 0

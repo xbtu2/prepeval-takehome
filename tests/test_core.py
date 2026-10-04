@@ -169,3 +169,48 @@ def test_items_are_deterministic():
   b = F.make_item("master_mix", 7, "test")
   assert a.to_json() == b.to_json()
   assert F.make_item("master_mix", 7, "train").prompt != a.prompt
+
+
+# ----------------------------------------------------------------------------------------------------
+# review-driven grader behaviours
+# ----------------------------------------------------------------------------------------------------
+def test_well_lists_accept_range_strings_and_prefixes():
+  it = _find("well_addressing", lambda i: i.feasible and i.world["sub"] == 2)
+  col = it.gold["wells"][0][1:]
+  rng_str = f"A{col}:H{col}"
+  assert G.grade(it, json.dumps({"wells": rng_str, "count": 8, "feasible": True})).accepted
+  assert G.grade(it, json.dumps({"wells": [f"well {w}" for w in it.gold["wells"]], "count": 8, "feasible": True})).accepted
+  wrong = f"A{col}:G{col}"
+  assert not G.grade(it, json.dumps({"wells": wrong, "count": 8, "feasible": True})).accepted
+
+
+def test_collapsed_components_are_rejected():
+  it = _find("master_mix", lambda i: i.feasible and i.world["kind"] == "PCR")
+  g = dict(it.gold)
+  totals = dict(g["component_totals_uL"])
+  fwd = totals.pop("forward primer")
+  totals.pop("reverse primer")
+  totals["primer"] = fwd
+  assert not G.grade(it, json.dumps({**g, "component_totals_uL": totals})).accepted
+
+
+def test_trailing_object_does_not_shadow_the_answer():
+  it = _find("dilute_stock", lambda i: i.feasible)
+  text = G.gold_completion(it) + '\n{"note": "done"}'
+  assert G.grade(it, text).accepted
+
+
+def test_lenient_feasibility_phrasing():
+  it = _find("dilute_stock", lambda i: i.feasible)
+  g = dict(it.gold)
+  for phrase in ("True.", "yes, feasible", "feasible: true"):
+    assert G.grade(it, json.dumps({**g, "feasible": phrase})).accepted, phrase
+  assert not G.grade(it, json.dumps({**g, "feasible": "not feasible"})).accepted
+
+
+def test_manifest_sha256_matches_files():
+  import hashlib
+
+  manifest = json.load(open(D.DATA_DIR / "manifest.json"))
+  for name, digest in manifest["sha256"].items():
+    assert hashlib.sha256((D.DATA_DIR / name).read_bytes()).hexdigest() == digest, name

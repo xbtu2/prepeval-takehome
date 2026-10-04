@@ -104,7 +104,7 @@ def _choose_target_unit(unit_fam: dict, c_base: float, rng: random.Random) -> tu
   options = []
   for u, scale in unit_fam.items():
     val = c_base / scale
-    if 0.1 <= val <= 50000:
+    if 0.1 <= val <= 1000:
       options.append((u, val))
   if not options:
     u = min(unit_fam, key=lambda k: unit_fam[k])
@@ -151,11 +151,16 @@ def gen_dilute_stock(rng: random.Random, template: int, split: str, seed: int, t
     ratio = rng.choice([0.5, 0.25, 0.2, 0.1])  # target more concentrated than the stock
   elif trap:
     trap_kind = "below_pipette_min"
-    ratio = rng.choice([r for r in RATIOS if v_ul / r < pmin] or [1000, 2000, 5000])
-    if v_ul / ratio >= pmin:
-      ratio = v_ul / (pmin / 2)  # force the stock volume to half the pipette minimum
+    # keep the trap realistic: a uL-scale final volume whose single-transfer stock volume falls under the pipette minimum
+    v_ul = float(rng.choice([v for v in VOLUMES_UL if v / max(RATIOS) < pmin]))
+    ratio = rng.choice([r for r in RATIOS if v_ul / r < pmin])
   else:
-    ratio = rng.choice([r for r in RATIOS if pmin <= v_ul / r <= v_ul * 0.5])
+    allowed = [r for r in RATIOS if pmin <= v_ul / r <= v_ul * 0.5]
+    if fam is FOLD:  # working buffers are 1X or 2X in practice
+      allowed = [r for r in (s_val, s_val / 2) if pmin <= v_ul / r <= v_ul * 0.5] or allowed
+    if fam is PERCENT:  # keep targets >= 0.05 %
+      allowed = [r for r in allowed if s_val / r >= 0.05] or allowed
+    ratio = rng.choice(allowed)
   c2 = c1 / ratio
   t_unit, t_val = _choose_target_unit(fam, c2, rng)
   stock_ul = v_ul / ratio
@@ -173,6 +178,7 @@ def gen_dilute_stock(rng: random.Random, template: int, split: str, seed: int, t
     f"stock: {name} at {fmt(s_val)} {s_unit}",
     f"diluent: {diluent}",
     f"final volume required: {_vol_text(v_ul)}",
+    f"procedure: one direct transfer of stock into the diluent (no intermediate dilutions)",
     f"smallest volume the pipette can transfer: {fmt(pmin)} µL",
   ]
   question = "How much stock and how much diluent (in µL) go into the final solution?"
@@ -191,7 +197,7 @@ def gen_dilute_stock(rng: random.Random, template: int, split: str, seed: int, t
   if c2 > c1:
     tr.append("The target is more concentrated than the stock, so no dilution can reach it: infeasible.")
   else:
-    tr.append(f"C1·V1 = C2·V2 → V1 = C2·V2/C1 = {fmt(c1 / fam[t_unit])} vs {fmt(t_val)}: dilution factor {fmt(ratio)}, so stock volume = {fmt(v_ul)}/{fmt(ratio)} = {fmt(stock_ul)} µL.")
+    tr.append(f"Dilution factor = C1/C2 = {fmt(c1 / fam[t_unit])}/{fmt(t_val)} = {fmt(ratio)}; by C1·V1 = C2·V2, stock volume V1 = V2/{fmt(ratio)} = {fmt(v_ul)}/{fmt(ratio)} = {fmt(stock_ul)} µL.")
     if stock_ul < pmin:
       tr.append(f"{fmt(stock_ul)} µL is below the pipette minimum of {fmt(pmin)} µL, so this cannot be pipetted as stated: infeasible.")
     else:
@@ -305,7 +311,7 @@ def gen_master_mix(rng: random.Random, template: int, split: str, seed: int, tra
 
   intent = Q3_INTENTS[template % len(Q3_INTENTS)].format(N=N, R=R, kind=kind)
   lines = [f"per-reaction recipe ({R} µL total): " + ", ".join(f"{nm} {fmt(v)} µL" for nm, v in comps) + f", template {fmt(tmpl)} µL, water to volume",
-           f"lab policy: prepare {excess}% more mix than the reactions strictly need",
+           f"lab policy: prepare exactly {excess}% more mix than the reactions strictly need (scale every component by that factor; do not round up to whole reactions)",
            "available: all listed reagents and nuclease-free water"]
   world = {"kind": kind, "R": R, "N": N, "excess_pct": excess, "components": comps, "template_uL": tmpl}
   question = "How many reactions' worth of mix is prepared, how much of each component (µL) goes into the mix, and how much water (µL)?"
@@ -348,6 +354,11 @@ def gen_normalize_samples(rng: random.Random, template: int, split: str, seed: i
   if trap:
     i = rng.randrange(3)
     concs[i] = q(Ct * rng.uniform(0.3, 0.9), 3)
+  elif rng.random() < 0.3:  # one sample so concentrated that the naive sample volume falls under the pipette minimum
+    i = rng.randrange(3)
+    c_min = Ct * Vmin / pmin  # above this, Ct*Vmin/c < pmin
+    if c_min / Ct <= 25:
+      concs[i] = q(c_min * rng.uniform(1.2, 2.0), 4)
   feasible = all(c > Ct for c in concs)
   # available volume per sample: a round number comfortably above what the reference construction needs
   avail = []
@@ -512,6 +523,7 @@ def gen_labware_fit(rng: random.Random, template: int, split: str, seed: int, tr
   lines = ["containers available:"] + [f"  {CONTAINER_LABELS[k]}: {CAT[k]['display']}" for k in CONTAINER_LABELS]
   lines.append(f"lab policy: a trough must be loaded with {fmt(dead)} µL more than will be aspirated from it (liquid the channels cannot reach)")
   lines.append("plates of each format are in unlimited supply; one container type is used per task")
+  lines.append("the source container is loaded once before the step and is not refilled")
   meta = {"sub": sub}
   feasible = True
   trough = CAT["trough_60mL"]
@@ -541,7 +553,7 @@ def gen_labware_fit(rng: random.Random, template: int, split: str, seed: int, tr
     v = rng.choice([20, 40, 50, 60, 100, 150, 200, 300, 350, 500, 800, 1000, 1500, 2000])
     if trap:
       v = rng.choice([2500, 3000, 4000, 5000])
-    lines.append("rule for this step: use the plate format with the fewest wells whose wells can hold the per-sample volume")
+    lines.append("rule for this step: use the plate format with the smallest per-well capacity that still holds the per-sample volume")
     fits = [k for k in ["plate_384", "plate_96_flat", "plate_96_deep"] if v <= CAT[k]["well_max_uL"]]
     feasible = bool(fits)
     intent = f"Store {n} distinct samples, {fmt(v)} µL each, so that no two samples share a well."
@@ -552,7 +564,7 @@ def gen_labware_fit(rng: random.Random, template: int, split: str, seed: int, tr
       wells = CAT[k]["rows"] * CAT[k]["cols"]
       plates = math.ceil(n / wells)
       gold = {"container": CONTAINER_LABELS[k], "plates_needed": plates, "feasible": True}
-      tr = f"Samples must stay separate → a plate, not the trough. Per-well capacity: C1 {fmt(CAT['plate_384']['well_max_uL'])}, C2 {fmt(CAT['plate_96_flat']['well_max_uL'])}, C3 {fmt(CAT['plate_96_deep']['well_max_uL'])} µL; the fewest-well format holding {fmt(v)} µL is {CONTAINER_LABELS[k]} ({wells} wells). Plates = ceil({n}/{wells}) = {plates}."
+      tr = f"Samples must stay separate → a plate, not the trough. Per-well capacity: C1 {fmt(CAT['plate_384']['well_max_uL'])}, C2 {fmt(CAT['plate_96_flat']['well_max_uL'])}, C3 {fmt(CAT['plate_96_deep']['well_max_uL'])} µL; the smallest-capacity format holding {fmt(v)} µL is {CONTAINER_LABELS[k]} ({wells} wells). Plates = ceil({n}/{wells}) = {plates}."
     else:
       gold = {"container": None, "plates_needed": None, "feasible": False}
       tr = f"{fmt(v)} µL exceeds every well capacity (largest is {fmt(CAT['plate_96_deep']['well_max_uL'])} µL), so no plate can hold the samples: infeasible."

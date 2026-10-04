@@ -89,9 +89,9 @@ def write_jsonl(path: Path, items: list[Item]) -> str:
   h = hashlib.sha256()
   with path.open("w") as fh:
     for it in items:
-      line = json.dumps(it.to_json(), ensure_ascii=False)
-      fh.write(line + "\n")
-      h.update(line.encode("utf-8"))
+      data = (json.dumps(it.to_json(), ensure_ascii=False) + "\n").encode("utf-8")
+      fh.write(data.decode("utf-8"))
+      h.update(data)
   return h.hexdigest()
 
 

@@ -8,7 +8,7 @@
       "rows": 8,
       "cols": 12,
       "well_max_uL": 360.0,
-      "display": "96-well plate, 8 rows x 12 columns, each well max 360 uL"
+      "display": "96-well plate, 8 rows x 12 columns, each well max 360 \u00b5L"
     },
     "plate_96_deep": {
       "plr_id": "cor_96_wellplate_2mL_Vb",
@@ -16,7 +16,7 @@
       "rows": 8,
       "cols": 12,
       "well_max_uL": 2393.0,
-      "display": "96-well deep-well plate, 8 rows x 12 columns, each well max 2393 uL"
+      "display": "96-well deep-well plate, 8 rows x 12 columns, each well max 2393 \u00b5L"
     },
     "plate_384": {
       "plr_id": "biorad_384_wellplate_50uL_Vb",
@@ -24,7 +24,7 @@
       "rows": 16,
       "cols": 24,
       "well_max_uL": 70.6,
-      "display": "384-well plate, 16 rows x 24 columns, each well max 70.6 uL"
+      "display": "384-well plate, 16 rows x 24 columns, each well max 70.6 \u00b5L"
     },
     "trough_60mL": {
       "plr_id": "hamilton_1_trough_60mL_Vb",
@@ -32,7 +32,7 @@
       "rows": 1,
       "cols": 1,
       "well_max_uL": 60000.0,
-      "display": "single-compartment trough, one shared liquid for all channels, max 60000 uL"
+      "display": "single-compartment trough, one shared liquid for all channels, max 60000 \u00b5L"
     }
   }
 }

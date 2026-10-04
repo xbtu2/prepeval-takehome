@@ -77,11 +77,15 @@ def _try_parse(s: str):
 
 
 def extract_json(text: str) -> dict | None:
-  """Last balanced {...} in `text` that parses as a dict (JSON, or a Python dict literal)."""
+  """Last balanced {...} in `text` that parses as a dict (JSON, or a Python dict literal).
+
+  Prefers the last object that carries a `feasible` key, so a stray trailing object (a note, a restated
+  schema) does not shadow the answer."""
   if not text:
     return None
   s = _FENCE_RE.sub(" ", text)
   end = len(s)
+  fallback = None
   for _ in range(6):  # try the last few candidate objects
     close = s.rfind("}", 0, end)
     if close < 0:
@@ -108,9 +112,12 @@ def extract_json(text: str) -> dict | None:
     if start >= 0:
       obj = _try_parse(s[start : close + 1])
       if isinstance(obj, dict):
-        return {norm_key(k): v for k, v in obj.items()}
+        normed = {norm_key(k): v for k, v in obj.items()}
+        if "feasible" in normed:
+          return normed
+        fallback = fallback or normed
     end = close  # retry with an earlier object
-  return None
+  return fallback
 
 
 def coerce_number(v):
@@ -134,10 +141,10 @@ def coerce_bool(v):
     return v
   if isinstance(v, str):
     s = v.strip().lower()
-    if s in ("true", "yes", "feasible", "1"):
-      return True
-    if s in ("false", "no", "infeasible", "0"):
+    if "false" in s or "infeasible" in s or "not feasible" in s or s.startswith("no"):
       return False
+    if "true" in s or s.startswith("yes") or s in ("feasible", "1", "y", "t"):
+      return True
   if isinstance(v, (int, float)) and v in (0, 1):
     return bool(v)
   return None
@@ -175,13 +182,19 @@ def _check_volume_dict(pred, gold):
   pn = {norm_key(k): v for k, v in pred.items()}
   ok = True
   out = {}
+  used: set = set()
   for name, g in gold.items():
     key = norm_key(name)
-    v = pn.get(key)
-    if v is None:  # tolerate minor renames: match on the longest common token
-      cands = [k for k in pn if key in k or k in key]
-      v = pn[cands[0]] if len(cands) == 1 else None
-    p = coerce_number(v)
+    match = key if key in pn else None
+    if match is None:  # tolerate minor renames, but each predicted key may serve only one component
+      cands = [k for k in pn if (key in k or k in key) and k not in used]
+      match = cands[0] if len(cands) == 1 else None
+    if match is None or match in used:
+      out[name] = None
+      ok = False
+      continue
+    used.add(match)
+    p = coerce_number(pn[match])
     out[name] = p
     ok = ok and p is not None and _close(p, float(g), ABS_UL)
   return ok, out
@@ -192,12 +205,23 @@ def _check_count(pred, gold):
   return p is not None and float(p).is_integer() and int(p) == int(gold), p
 
 
-def _check_wells(pred, gold):
+def _check_wells(pred, gold, params=None):
+  params = params or {}
   if isinstance(pred, str):
-    pred = [x for x in re.split(r"[,\s;]+", pred) if x]
+    pred = [x for x in re.split(r"[,;\s]+(?![^:]*\b$)|[,;]\s*|\s+", pred) if x]
   if not isinstance(pred, (list, tuple)):
     return False, pred
-  return L.wells_equal(pred, gold), list(pred)
+  names = []
+  for x in pred:
+    x = re.sub(r"^(?:well|wells)\s+", "", str(x).strip(), flags=re.IGNORECASE)
+    if ":" in x and "rows" in params:  # a range such as "A5:H5" names the same wells as the list
+      try:
+        names.extend(L.expand_range(x, params["rows"], params["cols"]))
+        continue
+      except (ValueError, IndexError):
+        return False, pred
+    names.append(x)
+  return L.wells_equal(names, gold), names
 
 
 def _check_well(pred, gold):
@@ -220,7 +244,7 @@ def _check_normalize_pair(pred_s, pred_d, i: int, params: dict):
   conc = c * s / total
   # concentration within REL; volume constraints within the same absolute band as every other volume
   ok = (_close(conc, params["Ct"], ABS_NUM) and total >= params["Vmin"] - ABS_UL
-        and s <= params["avail"][i] + ABS_UL and s >= params["pmin"] - ABS_UL)
+        and s <= params["avail"][i] + ABS_UL and s >= params["pmin"] - 1e-6)
   return ok, (s, d)
 
 
@@ -275,7 +299,7 @@ def grade(item: Item, completion: str) -> Grade:
     elif kind == "count":
       ok, p = _check_count(pv, gold)
     elif kind == "wells":
-      ok, p = _check_wells(pv, gold)
+      ok, p = _check_wells(pv, gold, params)
     elif kind == "well":
       ok, p = _check_well(pv, gold)
     elif kind == "choice":

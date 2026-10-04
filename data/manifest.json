@@ -28,7 +28,7 @@
     1375
   ],
   "fewshot_ids": [
-    "dilute_stock-train-01001",
+    "dilute_stock-train-01002",
     "well_addressing-train-01004"
   ],
   "census": {
@@ -95,8 +95,8 @@
     "PASS": true
   },
   "sha256": {
-    "test.jsonl": "59967ba78c6d361e930cb6b381723bd6986d21b1afc01d6e01404c062c40b11c",
-    "train.jsonl": "9a9644a636257e47e3fdf1e44bc5a7d8a524015a9f27766ec51f98ad6d212476",
-    "fewshot.jsonl": "9830254df445114f5ef721d09ef03191704d639e2f08994b9fa85ad170be5ab9"
+    "test.jsonl": "e10b7842f36ba7ba037e3a1ca33672afd30464e898e5ff8f17744e9a1aa6ea7a",
+    "train.jsonl": "b1e2dee71d4b51e1ec03e204c958c7e585303476318597fe70e9396f16541dd7",
+    "fewshot.jsonl": "ee7e6bd9d1caff4ad52234c23f79f4127965d3138cf06cdbaeab1eeddec4609f"
   }
 }
