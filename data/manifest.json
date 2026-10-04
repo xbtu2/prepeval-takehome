@@ -1,0 +1,102 @@
+{
+  "generator_version": "0.1.0",
+  "plr_commit": "160bfe5dd4d8897834a11c088567192ffb379fbb",
+  "families": [
+    "dilute_stock",
+    "serial_dilution",
+    "master_mix",
+    "normalize_samples",
+    "well_addressing",
+    "labware_fit"
+  ],
+  "train_families": [
+    "dilute_stock",
+    "serial_dilution",
+    "master_mix",
+    "well_addressing"
+  ],
+  "heldout_families": [
+    "normalize_samples",
+    "labware_fit"
+  ],
+  "test_seeds": [
+    0,
+    40
+  ],
+  "train_seeds": [
+    1000,
+    1375
+  ],
+  "fewshot_ids": [
+    "dilute_stock-train-01001",
+    "well_addressing-train-01004"
+  ],
+  "census": {
+    "test": {
+      "dilute_stock": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      },
+      "serial_dilution": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      },
+      "master_mix": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      },
+      "normalize_samples": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      },
+      "well_addressing": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      },
+      "labware_fit": {
+        "n": 40,
+        "infeasible": 8,
+        "trap_share": 0.2
+      }
+    },
+    "train": {
+      "dilute_stock": {
+        "n": 375,
+        "infeasible": 75,
+        "trap_share": 0.2
+      },
+      "serial_dilution": {
+        "n": 375,
+        "infeasible": 75,
+        "trap_share": 0.2
+      },
+      "master_mix": {
+        "n": 375,
+        "infeasible": 75,
+        "trap_share": 0.2
+      },
+      "well_addressing": {
+        "n": 306,
+        "infeasible": 59,
+        "trap_share": 0.193
+      }
+    }
+  },
+  "leak_check": {
+    "test_prompt_in_train": 0,
+    "heldout_in_train": 0,
+    "gold_value_in_prompt": 0,
+    "fewshot_value_in_test": 0,
+    "PASS": true
+  },
+  "sha256": {
+    "test.jsonl": "59967ba78c6d361e930cb6b381723bd6986d21b1afc01d6e01404c062c40b11c",
+    "train.jsonl": "9a9644a636257e47e3fdf1e44bc5a7d8a524015a9f27766ec51f98ad6d212476",
+    "fewshot.jsonl": "9830254df445114f5ef721d09ef03191704d639e2f08994b9fa85ad170be5ab9"
+  }
+}

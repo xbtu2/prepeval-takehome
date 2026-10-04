@@ -1,0 +1,38 @@
+{
+  "plr_commit": "160bfe5dd4d8897834a11c088567192ffb379fbb",
+  "plr_version": "0.2.2",
+  "labware": {
+    "plate_96_flat": {
+      "plr_id": "cor_96_wellplate_360uL_Fb",
+      "kind": "plate",
+      "rows": 8,
+      "cols": 12,
+      "well_max_uL": 360.0,
+      "display": "96-well plate, 8 rows x 12 columns, each well max 360 uL"
+    },
+    "plate_96_deep": {
+      "plr_id": "cor_96_wellplate_2mL_Vb",
+      "kind": "deep-well plate",
+      "rows": 8,
+      "cols": 12,
+      "well_max_uL": 2393.0,
+      "display": "96-well deep-well plate, 8 rows x 12 columns, each well max 2393 uL"
+    },
+    "plate_384": {
+      "plr_id": "biorad_384_wellplate_50uL_Vb",
+      "kind": "plate",
+      "rows": 16,
+      "cols": 24,
+      "well_max_uL": 70.6,
+      "display": "384-well plate, 16 rows x 24 columns, each well max 70.6 uL"
+    },
+    "trough_60mL": {
+      "plr_id": "hamilton_1_trough_60mL_Vb",
+      "kind": "trough",
+      "rows": 1,
+      "cols": 1,
+      "well_max_uL": 60000.0,
+      "display": "single-compartment trough, one shared liquid for all channels, max 60000 uL"
+    }
+  }
+}
