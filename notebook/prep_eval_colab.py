@@ -50,6 +50,9 @@ import subprocess
 IN_COLAB = "google.colab" in sys.modules
 if IN_COLAB:
   # Colab ships torch + transformers; never reinstall torch (it would replace the CUDA build).
+  # Colab also preinstalls torchao 0.10, and peft >= 0.18 raises ImportError at get_peft_model() when a torchao
+  # older than 0.16 is present; nothing here uses torchao, so remove it rather than upgrade it against Colab's torch.
+  subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"], check=False)
   subprocess.run([sys.executable, "-m", "pip", "install", "-q", "peft>=0.14", "trl>=0.19", "datasets>=3.0", "accelerate>=1.0"], check=True)
   if not os.path.isdir(REPO_DIR):
     subprocess.run(["git", "clone", "-q", REPO_URL, REPO_DIR], check=True)
