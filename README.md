@@ -14,8 +14,9 @@ plain Python script on a CPU in smoke mode.
 | | |
 |---|---|
 | Colab | open `notebook/prep_eval_colab.ipynb`, *Runtime → Change runtime type → T4 GPU*, *Run all* |
-| Local build and tests | `uv sync --all-extras && uv run pytest` |
-| Local smoke run (CPU, 0.5B model, every code path) | `PREPEVAL_SMOKE=1 uv run python notebook/prep_eval_colab.py` |
+| GPU box, full run as a script | `UV_TORCH_BACKEND=auto uv sync --all-extras && uv run python notebook/prep_eval_colab.py` (~35 min on a T4; writes `results/`) |
+| Build and tests (any box) | `UV_TORCH_BACKEND=cpu uv sync --all-extras && uv run pytest` |
+| Smoke run (CPU, 0.5B model, every code path; slow) | `PREPEVAL_SMOKE=1 uv run python notebook/prep_eval_colab.py` |
 | Rebuild the item files | `uv run python -m prepeval.dataset` (needs the `plr` extra once, for `labware.json`) |
 
 ## 1. The capability
