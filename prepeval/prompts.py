@@ -42,10 +42,10 @@ def messages_pot(item: Item) -> list[dict]:
 
 
 ARMS = {
-  "baseline": {"messages": lambda item, fewshot: messages_baseline(item), "max_new_tokens": 384, "tool": None},
-  "fewshot": {"messages": lambda item, fewshot: messages_fewshot(item, fewshot), "max_new_tokens": 384, "tool": None},
+  "baseline": {"messages": lambda item, fewshot: messages_baseline(item), "max_new_tokens": 512, "tool": None},
+  "fewshot": {"messages": lambda item, fewshot: messages_fewshot(item, fewshot), "max_new_tokens": 512, "tool": None},
   "pot": {"messages": lambda item, fewshot: messages_pot(item), "max_new_tokens": 320, "tool": "python"},
-  "sft": {"messages": lambda item, fewshot: messages_baseline(item), "max_new_tokens": 384, "tool": None},
+  "sft": {"messages": lambda item, fewshot: messages_baseline(item), "max_new_tokens": 512, "tool": None},
 }
 
 

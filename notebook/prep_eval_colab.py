@@ -55,7 +55,11 @@ if IN_COLAB:
     subprocess.run(["git", "clone", "-q", REPO_URL, REPO_DIR], check=True)
   os.chdir(REPO_DIR)
 elif not os.path.isdir("prepeval"):
-  os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+  try:
+    os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+  except NameError:  # interactive kernel: __file__ undefined; assume cwd is the repo root or notebook/
+    if os.path.isdir(os.path.join("..", "prepeval")):
+      os.chdir("..")
 sys.path.insert(0, os.getcwd())
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -168,6 +172,12 @@ def load_base():
   return m.to(device).eval()
 
 
+MAX_LEN = 1024  # SFT sequence cap; the longest training row is ~785 tokens (checked here, before any GPU time is spent)
+if "sft" in ARMS:
+  _lens = [len(tok(tok.apply_chat_template(P.messages_baseline(it), tokenize=False, add_generation_prompt=True) + P.sft_target(it))["input_ids"]) + 1 for it in train]
+  assert max(_lens) <= MAX_LEN, f"longest SFT row {max(_lens)} tokens > MAX_LEN={MAX_LEN}"
+  print(f"SFT rows fit: max {max(_lens)} tokens <= {MAX_LEN}")
+
 model = load_base()
 import copy
 
@@ -187,6 +197,8 @@ def generate(model, messages_list, max_new_tokens, prefill="", stop_strings=None
   texts = [render(m, prefill) for m in messages_list]
   order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
   outs = [None] * len(texts)
+  hit_cap = [False] * len(texts)
+  generate.last_hit_cap = hit_cap
   for b in range(0, len(order), batch_size):
     idx = order[b : b + batch_size]
     enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True).to(device)
@@ -197,6 +209,7 @@ def generate(model, messages_list, max_new_tokens, prefill="", stop_strings=None
     new = gen[:, enc["input_ids"].shape[1] :]
     for i, row in zip(idx, new):
       outs[i] = prefill + tok.decode(row, skip_special_tokens=True)
+      hit_cap[i] = int((row != tok.pad_token_id).sum()) >= max_new_tokens
   return outs
 
 
@@ -211,6 +224,7 @@ def run_arm(arm, model, items, tag=None):
     raw = [r if r.rstrip().endswith("```") else r + "\n```" for r in raw]
   else:
     raw = generate(model, msgs, cap)
+  hit_cap = list(generate.last_hit_cap)
   elapsed = time.time() - t0
   grades, records = {}, []
   for it, out in zip(items, raw):
@@ -218,10 +232,12 @@ def run_arm(arm, model, items, tag=None):
     g = G.grade(it, graded_text)
     grades[it.id] = g
     records.append({"item_id": it.id, "family": it.family, "raw": out, "graded_text": graded_text if spec["tool"] else None,
-                    "sandbox": (run.status if run else None), "accepted": g.accepted, "error_class": g.error_class})
+                    "sandbox": (run.status if run else None), "accepted": g.accepted, "error_class": g.error_class,
+                    "hit_token_cap": bool(hit_cap[len(records)])})
   acc = np.mean([g.accepted for g in grades.values()])
   print(f"[{tag or arm}] n={len(items)} accepted={acc:.3f} time={elapsed:.0f}s "
-        f"({elapsed / len(items):.2f}s/item) format_fail={np.mean([g.error_class == 'format' for g in grades.values()]):.2f}")
+        f"({elapsed / len(items):.2f}s/item) format_fail={np.mean([g.error_class == 'format' for g in grades.values()]):.2f} "
+        f"hit_token_cap={np.mean(hit_cap):.2f}")
   return grades, records, elapsed
 
 
@@ -255,18 +271,25 @@ if "pot" in records_by_arm:
 # fp32 adapters (PEFT default). Held-out families `normalize_samples` and `labware_fit` never appear.
 
 # %%
-sft_grades = None
+lora_prov = None
 if "sft" in ARMS:
   from datasets import Dataset
   from peft import LoraConfig, PeftModel, get_peft_model
   from trl import SFTConfig, SFTTrainer
 
-  rows = [{"prompt": render(P.messages_baseline(it)), "completion": P.sft_target(it) + tok.eos_token + "\n"} for it in train]
-  MAX_LEN = 768
-  lens = [len(tok(r["prompt"] + r["completion"])["input_ids"]) for r in rows]
+  # completion ends without EOS: TRL appends the EOS token itself for prompt-completion rows
+  rows = [{"prompt": render(P.messages_baseline(it)), "completion": P.sft_target(it)} for it in train]
+  lens = [len(tok(r["prompt"] + r["completion"])["input_ids"]) + 1 for r in rows]
   assert max(lens) <= MAX_LEN, f"longest training row {max(lens)} tokens > {MAX_LEN}: truncation would drop the JSON"
-  print(f"SFT rows: {len(rows)}  token length: median {int(np.median(lens))}, max {max(lens)}")
+  print(f"SFT rows: {len(rows)}  token length: median {int(np.median(lens))}, max {max(lens)} (cap {MAX_LEN})")
   ds = Dataset.from_list(rows)
+
+  # a fresh base model for training: get_peft_model wraps in place, and the pristine model already served arms A-C
+  del model
+  gc.collect()
+  if device == "cuda":
+    torch.cuda.empty_cache()
+  model = load_base()
 
   lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
                     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
@@ -276,24 +299,33 @@ if "sft" in ARMS:
   import dataclasses
 
   supported = {f.name for f in dataclasses.fields(SFTConfig)}
-  cfg_kw = dict(output_dir=os.path.join(OUT_DIR, "sft_tmp"), per_device_train_batch_size=1 if SMOKE else 4,
-                gradient_accumulation_steps=1 if SMOKE else 2, learning_rate=2e-4, num_train_epochs=1,
-                max_steps=SFT_MAX_STEPS, lr_scheduler_type="cosine", warmup_ratio=0.03, logging_steps=10,
+  per_device, accum = (1, 1) if SMOKE else (2, 4)  # effective batch 8; 2 x 4 keeps a 16 GB T4 comfortable
+  n_steps = SFT_MAX_STEPS if SFT_MAX_STEPS > 0 else int(np.ceil(len(rows) / (per_device * accum)))
+  cfg_kw = dict(output_dir=os.path.join(OUT_DIR, "smoke-sft_tmp" if SMOKE else "sft_tmp"), per_device_train_batch_size=per_device,
+                gradient_accumulation_steps=accum, learning_rate=2e-4, num_train_epochs=1,
+                max_steps=SFT_MAX_STEPS, lr_scheduler_type="cosine", warmup_steps=max(1, int(0.03 * n_steps)), logging_steps=10,
                 fp16=(device == "cuda"), bf16=False, report_to="none", save_strategy="no", seed=SEED,
                 gradient_checkpointing=False, max_length=MAX_LEN, packing=False, completion_only_loss=True,
                 dataset_num_proc=1, remove_unused_columns=True)
   if "max_length" not in supported:  # older trl
     cfg_kw["max_seq_length"] = cfg_kw.pop("max_length")
+  dropped = [k for k in cfg_kw if k not in supported]
+  if dropped:
+    print("SFTConfig keys not supported by this trl version (dropped):", dropped)
   cfg = SFTConfig(**{k: v for k, v in cfg_kw.items() if k in supported})
   trainer = SFTTrainer(model=peft_model, args=cfg, train_dataset=ds, processing_class=tok)
   t0 = time.time()
   train_out = trainer.train()
   timing["sft_train"] = time.time() - t0
   print(f"trained {train_out.global_step} steps in {timing['sft_train']:.0f}s; final loss {train_out.training_loss:.3f}")
+  if not np.isfinite(train_out.training_loss):
+    print("WARNING: non-finite training loss (fp16 overflow?) - the sft arm below is not trustworthy")
+  lora_prov = {"r": 16, "alpha": 32, "targets": "attn+mlp", "train_items": len(rows), "steps": int(train_out.global_step),
+               "final_loss": float(train_out.training_loss), "lr": 2e-4, "effective_batch": per_device * accum, "max_length": MAX_LEN}
 
-  adapter_dir = os.path.join(OUT_DIR, "lora_adapter")
+  adapter_dir = os.path.join(OUT_DIR, "smoke-lora_adapter" if SMOKE else "lora_adapter")
   trainer.model.save_pretrained(adapter_dir)
-  adapter_sha = hashlib.sha256(open(os.path.join(adapter_dir, "adapter_model.safetensors"), "rb").read()).hexdigest()[:16]
+  lora_prov["adapter_sha256_16"] = hashlib.sha256(open(os.path.join(adapter_dir, "adapter_model.safetensors"), "rb").read()).hexdigest()[:16]
   del trainer
   gc.collect()
   if device == "cuda":
@@ -304,8 +336,10 @@ if "sft" in ARMS:
   peft_model.config.use_cache = True
   check_items = test[:10]
   with peft_model.disable_adapter():
-    off = generate(peft_model, [P.messages_baseline(it) for it in check_items], 64, batch_size=len(check_items))
-  print("adapter-disabled generations produced:", sum(bool(o.strip()) for o in off), "/", len(off))
+    off = generate(peft_model, [P.messages_baseline(it) for it in check_items], 48, batch_size=len(check_items))
+  base_raw = {r["item_id"]: r["raw"] for r in records_by_arm["baseline"]}
+  same = sum(base_raw[it.id].startswith(o.rstrip()[:40]) for it, o in zip(check_items, off))
+  print(f"adapter disabled -> first tokens match the baseline arm on {same}/{len(off)} items (fp16 batch noise can cost one or two)")
 
   merged = peft_model.merge_and_unload().eval()
   merged.config.use_cache = True
@@ -348,7 +382,7 @@ for arm, recs in records_by_arm.items():
       it = next(i for i in test if i.id == r["item_id"])
       g = grades_by_arm[arm][it.id]
       shown = (r["graded_text"] or r["raw"]) if arm == "pot" else r["raw"]
-      print(f"--- [{cls}] {it.id}\n  gold: {json.dumps(it.gold)[:200]}\n  pred: {json.dumps(g.pred)[:200] if g.pred else None}")
+      print(f"--- [{cls}] {it.id}\n  gold: {json.dumps(it.gold)[:200]}\n  pred: {json.dumps(g.pred, default=str)[:200] if g.pred else None}")
       print("  model output (tail): " + shown.strip().replace("\n", " ⏎ ")[-300:])
 
 # %% [markdown]
@@ -431,7 +465,7 @@ provenance = {
   "dataset_sha256": manifest.get("sha256"), "generator_version": manifest["generator_version"], "plr_commit": manifest["plr_commit"],
   "prompt_sha256": {"system": hashlib.sha256(P.SYSTEM.encode()).hexdigest()[:16], "pot_system": hashlib.sha256(P.POT_SYSTEM.encode()).hexdigest()[:16]},
   "decoding": {"greedy": True, "repetition_penalty": 1.0, "max_new_tokens": {a: P.ARMS[a]["max_new_tokens"] for a in ARMS}, "batch_size": BATCH_SIZE},
-  "lora": ({"r": 16, "alpha": 32, "targets": "attn+mlp", "adapter_sha256_16": adapter_sha, "train_items": len(train), "steps": SFT_MAX_STEPS} if sft_grades is None and "sft" in grades_by_arm else None),
+  "lora": lora_prov,
   "n_test_items": len(test), "smoke": SMOKE, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }
 out_path = os.path.join(OUT_DIR, "smoke-cpu.json" if SMOKE else "results.json")

@@ -5,3 +5,7 @@ __pycache__/
 results/*.tmp
 hf_cache/
 *.egg-info/
+results/lora_adapter/
+results/smoke-lora_adapter/
+results/sft_tmp/
+results/smoke-sft_tmp/
