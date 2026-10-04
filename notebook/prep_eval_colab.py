@@ -169,8 +169,11 @@ def load_base():
 
 
 model = load_base()
-GEN = GenerationConfig(do_sample=False, temperature=None, top_p=None, top_k=None, repetition_penalty=1.0,
-                       pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id)
+import copy
+
+# A GenerationConfig passed to generate() replaces the model's own (which carries repetition_penalty=1.05
+# and sampling defaults); greedy decoding with no repetition penalty is all we want.
+GEN = GenerationConfig(do_sample=False, repetition_penalty=1.0, pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id)
 print(f"loaded {MODEL_ID}: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B params")
 
 
@@ -187,8 +190,10 @@ def generate(model, messages_list, max_new_tokens, prefill="", stop_strings=None
   for b in range(0, len(order), batch_size):
     idx = order[b : b + batch_size]
     enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True).to(device)
+    cfg = copy.deepcopy(GEN)
+    cfg.max_new_tokens = max_new_tokens
     kw = {"stop_strings": stop_strings, "tokenizer": tok} if stop_strings else {}
-    gen = model.generate(**enc, generation_config=GEN, max_new_tokens=max_new_tokens, **kw)
+    gen = model.generate(**enc, generation_config=cfg, **kw)
     new = gen[:, enc["input_ids"].shape[1] :]
     for i, row in zip(idx, new):
       outs[i] = prefill + tok.decode(row, skip_special_tokens=True)
@@ -300,7 +305,6 @@ if "sft" in ARMS:
   check_items = test[:10]
   with peft_model.disable_adapter():
     off = generate(peft_model, [P.messages_baseline(it) for it in check_items], 64, batch_size=len(check_items))
-  base_again = generate(model.base_model.model if hasattr(model, "base_model") else model, [P.messages_baseline(it) for it in check_items], 64, batch_size=len(check_items)) if False else None
   print("adapter-disabled generations produced:", sum(bool(o.strip()) for o in off), "/", len(off))
 
   merged = peft_model.merge_and_unload().eval()
