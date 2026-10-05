@@ -216,16 +216,16 @@ def hedge(summary: dict, smoke: bool) -> str:
 
 def _flag_verdict(ref: dict) -> str:
   p, tn, fn = ref["fisher_p"], ref["trap_n"], ref["feasible_n"]
-  small = " (fewer than 10 parsed flags on one side)" if min(tn, fn) < 10 else ""
+  small = " (under 10 parsed flags on one side)" if min(tn, fn) < 10 else ""
   if p is None:
     return "too few parsed flags to test" + small
   rate_t = ref["trap"] / tn if tn else 0.0
   rate_f = ref["feasible"] / fn if fn else 0.0
   if p >= 0.1:
-    return "the flag carries no information about infeasibility, so its trap refusals are refusals it would have made anyway" + small
+    return "the flag carries no information, so its trap refusals are refusals it would have made anyway" + small
   if p < 0.05 and rate_t > rate_f:
-    return "the flag carries information: it refuses traps more often than feasible items" + small
-  return "the evidence is inconclusive" + small
+    return "the flag carries information" + small
+  return "inconclusive" + small
 
 
 def _arm_headline(summary: dict, arm: str) -> str:
@@ -312,11 +312,10 @@ def render_prompting(summary: dict, R: dict, controls: dict, timing: dict, caps:
   for a in arms:
     ref = R["arms"][a]["refusals"]
     ff = R["arms"][a]["forced_feasible"]
-    lines.append(f"- `{a}`: refuses {ref['trap']}/{ref['trap_n']} traps and {ref['feasible']}/{ref['feasible_n']} feasible items "
-                 f"({fmt_p(ref['fisher_p'])}); {_flag_verdict(ref)}. Forcing `feasible = true` on every prediction would score "
-                 f"{fmt_num(ff['acc'])} against the recorded {fmt_num(summary['arms'][a]['acc'])}"
-                 + (f" ({ff['would_pass']} refused feasible item(s) carried correct values)." if ff["would_pass"] else
-                    "; no refused feasible item carried correct values."))
+    lines.append(f"- `{a}`: refuses {ref['trap']}/{ref['trap_n']} traps vs {ref['feasible']}/{ref['feasible_n']} feasible items "
+                 f"({fmt_p(ref['fisher_p'])}): {_flag_verdict(ref)}. Forced `feasible = true` would score {fmt_num(ff['acc'])} "
+                 f"(recorded {fmt_num(summary['arms'][a]['acc'])})"
+                 + (f"; {ff['would_pass']} refused feasible item(s) carried correct values." if ff["would_pass"] else "."))
   out.append("\n".join(lines))
 
   # (d) few-shot: where did the wins land?

@@ -172,7 +172,7 @@ above the floor, (acc − 0.200)/0.800: −0.135, −0.057, −0.172, +0.380.
 
 ![Outcome per item by family and arm for the three prompting arms](results/reference/fig_outcomes.png)
 
-![Refusal rate on traps against refusal rate on feasible items, all four arms; only sft sits above the diagonal](results/reference/fig_refusals_all.png)
+![Refusal rate on traps against refusal rate on feasible items, all four arms; only sft sits above the diagonal](results/reference/fig_refusals.png)
 
 What the numbers mean. Each statement below is recomputed from `raw_outputs.jsonl` by `prepeval/readings.py` and
 stored in `results.json`; the notebook prints the same sentences for whatever run it executes.
@@ -239,9 +239,9 @@ prepeval/
   readings.py    derived readings for the notebook's live narrative (bare-JSON share, refusal rates with Fisher exact,
                  held-out acceptance split into solved items and trap refusals, few-shot wins by family, PoT sandbox
                  outcomes against cap hits) and the Markdown renderers; stored in results.json under summary.readings
-  figures.py     the eight notebook figures (acceptance, outcomes per family, refusal rates before and after
-                 training, training lengths, loss curve, paired transitions, in-train vs held-out split); never
-                 selects a backend
+  figures.py     the notebook figures (acceptance, outcomes per family, refusal rates, loss curve, paired
+                 transitions, in-train vs held-out split; a training-length histogram is available but not
+                 drawn); never selects a backend
 data/            test.jsonl (240), train.jsonl (1 431), fewshot.jsonl (2), manifest.json (seeds, sha256, PLR commit)
 notebook/        prep_eval_colab.py (jupytext percent source) and the built .ipynb; the narrative cells hold the
                  story and the numbers in the text are computed from the run that is executing

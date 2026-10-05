@@ -21,79 +21,61 @@
 # **How to run.** Colab: *Runtime → Change runtime type → T4 GPU*, then *Run all* (about 35 min). The same file
 # runs as a plain script (`python notebook/prep_eval_colab.py`); `PREPEVAL_SMOKE=1` runs a tiny version of every
 # cell with a 0.5B model.
+#
+# **Reading it in 12 minutes.** (1) One item in both forms and the family table, section 4. (2) The controls
+# and the always-refuse floor, section 4.4. (3) The results table and the acceptance figure, section 8. (4) The
+# in-train versus held-out figure, section 8. (5) The few-shot and PoT readings, section 5. (6) Future
+# directions, section 9. Everything else is the evidence behind those six stops.
 
 # %% [markdown]
 # ## 1. Why this capability matters
 #
-# Every `transfer`, `serial_dilute`, `normalize` and master-mix step in a protocol compiler bottoms out in the
-# same arithmetic and the same addressing: stock and diluent volumes, carry volumes, per-well concentrations,
-# well lists, container choice. A wrong number here is a wrong plate, and the robot gives no warning.
+# Every transfer, serial dilution, normalisation and master-mix step in a protocol compiler bottoms out in the
+# same arithmetic and addressing: volumes, per-well concentrations, well lists, container choice. A wrong
+# number is a wrong plate, and the robot gives no warning. The task has a second half: recognising that a
+# request cannot be carried out as stated (a stock volume under the pipette minimum, a series that would
+# overflow the wells). A planner that complies with everything is as dangerous as one that refuses everything.
 #
-# The task has a second half that matters as much as the first: recognising that a request cannot be carried
-# out as stated (a stock volume under the pipette minimum, a series that would overflow the wells, a sample
-# already below the target concentration). A planner that complies with every request is as dangerous as one
-# that refuses every request.
-#
-# Failures are legible: a unit slip, an inverted dilution factor, a miscounted well block. That makes the
-# capability a good eval target: the score says how often the model is right and the error class says why it
-# is wrong.
-#
-# No public dataset of wet-lab calculation problems with numeric ground truth exists (the nearest are
-# college-chemistry sets such as SciBench and ChemistryQA, and LAB-Bench ProtocolQA, which is multiple-choice
-# troubleshooting). The items are therefore generated, seeded and leak-checked, with PyLabRobot supplying
-# labware facts and well addressing.
+# Failures are legible (a unit slip, an inverted factor, a miscounted block), so the error class says why the
+# model is wrong, not only how often. No public dataset of wet-lab calculations with numeric ground truth
+# exists, so the items are generated, seeded and leak-checked, with PyLabRobot supplying labware facts and
+# well addressing.
 
 # %% [markdown]
 # ## 2. Why a small model
 #
-# A frontier model would clear these items on first contact. The question this notebook asks is different:
-# can a model small enough to live on the instrument do the job, and what does it take to get it there. Four
-# reasons to want that:
+# A frontier model would clear these items on first contact. The question here is whether a model small
+# enough to live on the instrument can, and what it takes to get it there.
 #
-# 1. **On-instrument and offline deployment.** The planner runs on the instrument PC next to the driver. Many
-#    labs are air-gapped or under GxP change control, where every network dependency in the run loop is a
-#    validation item. A 1.5B model in fp16 is about 3 GB of weights and runs on a workstation GPU, or on CPU
-#    for low volumes.
-# 2. **Latency and cost per protocol step.** A protocol has hundreds of planning steps per run and a fleet
-#    multiplies that. Each call has to return in well under a second and cost close to nothing. Section 5
-#    prints the measured seconds per item for this run.
-# 3. **Ownership and fine-tunability.** The weights are yours. You can pin a version, hash it into the run
-#    record, audit it, and fine-tune it on your own procedures. A model behind an API can change between
-#    validation and production; a pinned checkpoint cannot. Section 7 trains a small adapter in minutes and
-#    records its hash.
-# 4. **Data privacy and IP.** Protocols, reagent identities, concentrations and sample metadata are the lab's
-#    IP and often its patients' data. With a local model none of it leaves the site.
+# 1. **On-instrument, offline.** The planner runs on the instrument PC, in labs that are air-gapped or under
+#    GxP change control, where every network call in the run loop is a validation item. A 1.5B model in fp16 is
+#    about 3 GB.
+# 2. **Latency and cost.** Hundreds of planning steps per run, times a fleet; each call has to be fast and
+#    nearly free. Section 5 prints the measured seconds per item.
+# 3. **Ownership.** Pinned, hashed, auditable weights you can fine-tune on your own procedures; no vendor drift
+#    between validation and production. Section 7 trains and hashes a small adapter.
+# 4. **Privacy and IP.** Protocols, reagents and sample metadata never leave the site.
 #
-# The price of all four is capability. Sections 3 to 5 measure that price; sections 6 to 8 test how much of
-# it a short fine-tune buys back.
+# The price is capability. Sections 3 to 5 measure it; sections 6 to 8 test how much a short fine-tune buys back.
 
 # %% [markdown]
 # ## 3. What goes wrong with small models on this task
 #
-# These are the failure modes the eval is built to separate. Each is stated here as an expectation; sections
-# 5 and 8 report whether it held on this run, with counts.
+# Expectations the eval is built to count; sections 5 and 8 report whether each held on this run.
 #
-# - **Answering without working.** Asked for a JSON object, a small instruct model tends to emit the object
-#   and nothing else, even when the system message invites it to work through the arithmetic. A direct answer
-#   to a multi-step calculation is a guess with a format.
-# - **Arithmetic and unit slips.** Inverted dilution factors (dividing by C2/C1), raw numerals divided across
-#   different units, a factor of 1 000 lost between mg/mL and ng/µL, a negative diluent volume written down
-#   without comment.
-# - **Refusals that carry no information.** The schema offers a `feasible` flag. A small model tends to
-#   refuse at the same rate on feasible and infeasible requests, so its refusals are noise. A constant
-#   always-refuse policy then scores higher than the model, because it collects every trap by accident.
-# - **Template over procedure.** Shown one worked example, the model copies that example's trace skeleton
-#   onto every item, including items from other families where the skeleton is wrong. After fine-tuning on
-#   four task types it may reproduce a trained skeleton on task types it never saw.
-# - **Code that is not a program.** Asked to write Python, the model writes a JSON dict inside a Python
-#   fence, with `true` and `false` spelled as JSON and arithmetic left unevaluated, or it runs past the token
-#   budget mid-expression.
-# - **Format fragility.** Expressions inside JSON values (`239.3 / 7`), an unclosed bracket, a repetition loop
-#   that runs to the cap.
+# - **Answering without working.** A bare JSON object instead of a trace: a guess with a format.
+# - **Arithmetic and unit slips.** Inverted dilution factors, raw numerals divided across units, a factor of
+#   1 000 lost between mg/mL and ng/µL.
+# - **Refusals that carry no information.** The model refuses feasible and infeasible requests at the same
+#   rate, so a constant always-refuse policy outscores it by collecting every trap.
+# - **Template over procedure.** A worked example's trace skeleton copied onto items where it is wrong; a
+#   fine-tuned skeleton reproduced on task types never seen.
+# - **Code that is not a program.** A JSON dict inside a Python fence with `true`/`false` spelled as JSON, or a
+#   program cut off at the token budget.
+# - **Format fragility.** Arithmetic inside JSON values, an unclosed bracket, a loop that runs to the cap.
 #
-# The eval records, per item, the error class (`format`, `feasibility`, `wrong_value`), the predicted
-# `feasible` flag, the sandbox outcome for code, and whether the token cap was hit, so each failure mode above
-# can be counted rather than guessed at.
+# Per item the eval records the error class, the predicted `feasible` flag, the sandbox outcome and whether
+# the token cap was hit, so each of these can be counted rather than guessed at.
 
 # %% [markdown]
 # ## 4. How the eval is built
@@ -458,12 +440,6 @@ fams = list(summary_prompt["arms"]["baseline"]["per_family"])
 show_md("**Where the prompting arms fail.** One row per family, one panel per arm; each item is one of five outcomes.")
 show_fig(FIG.fig_outcomes(records_by_arm, test, arms=list(grades_by_arm), families=fams), out_name("fig_outcomes.png"))
 
-# %%
-show_md("**Does the `feasible` flag carry information, for the three prompting arms?** Refusal rate on feasible items (x) against "
-        "refusal rate on traps (y). A flag that tracks infeasibility sits above the diagonal; a flag that refuses at random sits on it. "
-        "The fine-tuned arm is added to this figure in section 8.")
-show_fig(FIG.fig_refusals(summary_prompt, R5), out_name("fig_refusals.png"))
-
 # %% [markdown]
 # *Reference run (RTX 4090, fp16, see the callout before the provenance section): baseline 0.092, fewshot 0.154,
 # pot 0.062, all under the 0.200 floor.*
@@ -479,8 +455,8 @@ show_fig(FIG.fig_refusals(summary_prompt, R5), out_name("fig_refusals.png"))
 # completion is a programmatic reasoning trace, a `Final answer:` line and the gold JSON. Traces are produced by
 # the code that produces the gold, so they are correct by construction, and on infeasible rows they name the
 # check that fails. One in five training rows is infeasible, the same share as the test set. Below: the
-# composition, the token lengths against the sequence cap, and one feasible and one infeasible completion (the
-# prompt half of each row is the baseline prompt shown in section 4.3).
+# composition and token lengths, and one feasible and one infeasible completion (the prompt half of each row
+# is the baseline prompt shown in section 4.3).
 
 # %%
 lora_prov, lens, log_history, rows = None, [], [], []
@@ -495,10 +471,6 @@ if "sft" in ARMS:
   print("A feasible training completion\n" + "-" * 80 + "\n" + feas_row["completion"][:600])
   if trap_row:
     print("\nAn infeasible training completion\n" + "-" * 80 + "\n" + trap_row["completion"][:600])
-
-# %%
-show_md("**Training rows fit under the sequence cap.** Completion-only loss sees every gold JSON only if no row is truncated.")
-show_fig(FIG.fig_train_lengths(lens, MAX_LEN), out_name("fig_train_lengths.png"))
 
 # %% [markdown]
 # ## 7. Training design
@@ -646,30 +618,9 @@ show_md("**What the acceptances are.** In-train and held-out acceptance per arm,
 show_fig(FIG.fig_heldout_split(summary, R), out_name("fig_heldout_split.png"))
 
 # %%
-show_md("**Does the `feasible` flag carry information, after training?** Same axes as section 5 with the fine-tuned arm added. "
-        "A flag that tracks infeasibility sits above the diagonal.")
-show_fig(FIG.fig_refusals(summary, R), out_name("fig_refusals_all.png"))
-
-# %% [markdown]
-# ### Failure examples
-#
-# Reviewers trust examples more than CIs. Two per error class per arm; the full outputs are in
-# `results/raw_outputs.jsonl`.
-
-# %%
-for arm, recs in records_by_arm.items():
-  by_class = defaultdict(list)
-  for r in recs:
-    if not r["accepted"]:
-      by_class[r["error_class"]].append(r)
-  print("=" * 100 + f"\n{arm}")
-  for cls, rs in by_class.items():
-    for r in rs[:2]:
-      it = next(i for i in test if i.id == r["item_id"])
-      g = grades_by_arm[arm][it.id]
-      shown = (r["graded_text"] or r["raw"]) if arm == "pot" else r["raw"]
-      print(f"--- [{cls}] {it.id}\n  gold: {json.dumps(it.gold)[:200]}\n  pred: {json.dumps(g.pred, default=str)[:200] if g.pred else None}")
-      print("  model output (tail): " + shown.strip().replace("\n", " ⏎ ")[-300:])
+show_md("**Does the `feasible` flag carry information?** Refusal rate on feasible items (x) against refusal rate on traps (y), all "
+        "four arms. A flag that tracks infeasibility sits above the diagonal; a flag that refuses at random sits on it.")
+show_fig(FIG.fig_refusals(summary, R), out_name("fig_refusals.png"))
 
 # %% [markdown]
 # ### Reference run
@@ -750,3 +701,24 @@ show_md(ST.results_table(summary) + "\n\n" + ST.family_table(summary), code=True
 #    fair arm.
 # 9. Infeasibility discoverable from the world alone (drop the `feasible` key) with the refusal graded as free
 #    text.
+
+# %% [markdown]
+# ## Appendix: failure examples
+#
+# Reviewers trust examples more than CIs. One per error class per arm; the full outputs are in
+# `results/raw_outputs.jsonl`.
+
+# %%
+for arm, recs in records_by_arm.items():
+  by_class = defaultdict(list)
+  for r in recs:
+    if not r["accepted"]:
+      by_class[r["error_class"]].append(r)
+  print("=" * 100 + f"\n{arm}")
+  for cls, rs in by_class.items():
+    for r in rs[:1]:
+      it = next(i for i in test if i.id == r["item_id"])
+      g = grades_by_arm[arm][it.id]
+      shown = (r["graded_text"] or r["raw"]) if arm == "pot" else r["raw"]
+      print(f"--- [{cls}] {it.id}\n  gold: {json.dumps(it.gold)[:200]}\n  pred: {json.dumps(g.pred, default=str)[:200] if g.pred else None}")
+      print("  model output (tail): " + shown.strip().replace("\n", " ⏎ ")[-300:])
