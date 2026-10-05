@@ -2,7 +2,7 @@
 
 **A liquid handler executes whatever numbers and well addresses the planner emits, so turning protocol intent
 into volumes, wells and containers is a reasoning capability worth measuring. A 1.5B model scores 0.09 on it
-zero-shot, and two prompting levers leave it under a 0.20 always-refuse floor; a 90-second LoRA on generated
+zero-shot, and two prompting levers leave it under the 0.20 trivial-classifier floor; a 90-second LoRA on generated
 traces lifts it to 0.50 overall and 0.73 on the four procedures it was shown, and transfers nothing to the two it
 was not.**
 
@@ -25,7 +25,22 @@ plain Python script on a CPU in smoke mode.
 **Reagent-prep and labware reasoning for liquid handling**: given a protocol intent in a scientist's words and
 the facts of the bench (stock concentrations, container geometry, pipette limits, lab policies), produce the
 exact volumes, concentrations, well lists and container choices a robot would execute, and recognise when the
-request cannot be carried out as stated.
+request cannot be carried out as stated. In ML terms: structured prediction with an exact oracle and an
+abstention option, graded as exact-match accuracy under tolerance over the whole output.
+
+**For readers without a lab background.** A liquid handler is a robot that pipettes liquid between containers and
+executes whatever numbers it is given. A plate is a tray with a grid of small cups called wells (96-well: 8 rows
+A to H × 12 columns, about 360 µL each; 384-well: 16 × 24, about 70 µL), named like spreadsheet cells; a trough is
+one open basin all pipette tips share; an 8-channel head serves a whole plate column at once. A stock is a
+concentrated solution, a diluent thins it, and dilution conserves the dissolved amount (C1·V1 = C2·V2), so it can
+only lower a concentration. A serial dilution chains dilutions into a geometric series by carrying a fixed volume
+from well to well; a master mix is the shared ingredients of N reactions mixed once with a stated excess;
+normalising brings several samples to one concentration. The pipette minimum is the smallest transferable volume;
+dead volume is liquid a trough must hold that the tips cannot reach. **No lab knowledge is needed to solve any
+item**: every constant and convention is printed in the prompt, reagent names are opaque labels, units never
+cross kinds, and the capability tested is arithmetic, constraint checking and 2-D grid indexing.
+
+![Labware primer: a 96-well plate with a block, a column and an indexed well; a 5-point serial dilution; one direct dilution with the pipette-minimum case](results/reference/fig_primer.png)
 
 Why this one:
 
@@ -81,7 +96,7 @@ Programmatic, no LLM judge (`prepeval/grading.py`). The last JSON object in the 
 within `max(0.05 µL, 1 %)`, concentrations and reaction counts within 1 %; counts exact; well lists exact as
 sets (`A01` ≡ `A1`, a range such as `A5:H5` is expanded); container choice exact. An item is
 **accepted** only if every required field passes. For infeasible items only the `feasible` flag is graded: a
-specific refusal scores 1, acting anyway scores 0. Refusing a feasible item is a `feasibility` error. For
+refusal scores 1, acting anyway scores 0. Refusing a feasible item is a `feasibility` error. For
 `normalize_samples` any (sample, diluent) pair that reaches the target within tolerance, meets the minimum
 volume, respects the available volume and keeps the sample volume at or above the pipette minimum passes (any
 correct construction is accepted). Every failure is classed as `format`, `feasibility` or `wrong_value`.
@@ -97,7 +112,8 @@ correct construction is accepted). Every failure is classed as `format`, `feasib
 | constant policy "always infeasible" | = trap share (0.20) |
 | leak check at build time | no test prompt in train; held-out families absent from train; no non-trivial gold value printed in its own prompt except values given by construction that must be recognised rather than derived (a series' final volume and top concentration, the 2-fold carry, well counts) — any other collision is resampled; no few-shot value in a test gold |
 
-The strongest non-solving control is the **effective floor**; arms are also reported as position above it.
+The strongest non-solving control is the **trivial-classifier floor**: the better of the two constant policies, here always-abstain
+at the trap share (`effective_floor` in `results.json`); arms are also reported as position above it.
 
 ### Statistics
 
@@ -162,11 +178,11 @@ Per family (n = 40 each; directional):
 | labware_fit (held-out) | 40 | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) | 0.00 (0/40) |
 
 Controls on the run: gold accepted 1.000; 1 125 single-field corruptions rejected 1.000; gold program through the
-sandbox 1.000; always-feasible 0.000; always-infeasible 0.200; leak check pass; effective floor 0.200. Margin over
+sandbox 1.000; always-feasible 0.000; always-infeasible 0.200; leak check pass; trivial-classifier floor 0.200. Margin over
 the floor (acc − 0.200): baseline −0.108, fewshot −0.046, pot −0.138, sft +0.304; normalised to the headroom
 above the floor, (acc − 0.200)/0.800: −0.135, −0.057, −0.172, +0.380.
 
-![Acceptance by arm with 95 % CI and the always-refuse floor; per family, held-out families labelled](results/reference/figure.png)
+![Acceptance by arm with 95 % CI and the trivial-classifier floor; per family, held-out families labelled](results/reference/figure.png)
 
 ![Paired item transitions baseline to sft, per family](results/reference/fig_transitions_sft.png)
 
@@ -182,7 +198,7 @@ stored in `results.json`; the notebook prints the same sentences for whatever ru
 - For baseline and PoT the `feasible` flag carries no information: refusal rates on traps and on feasible items
   are the same (11/46 vs 41/182, Fisher p = 0.85; 9/44 vs 37/162, p = 0.84). Forcing `feasible = true` on every
   prediction gives 0.046 and 0.025, and no refused feasible item carried correct values. That is why both sit
-  under the 0.200 always-refuse floor. SFT's flag does carry information (21/48 vs 33/192, p < 0.001).
+  under the 0.200 trivial-classifier floor. SFT's flag does carry information (21/48 vs 33/192, p < 0.001).
 - Few-shot's +0.063 is 24 of 25 item-level wins in `dilute_stock`, the family of the dilution exemplar. Outside
   the two exemplar families (n = 160) few-shot is behind the baseline (5 vs 10 accepted, exact p = 0.062). On the
   previous item set, built with a different dilution exemplar, few-shot was 0.046 below the baseline; that build
@@ -193,7 +209,9 @@ stored in `results.json`; the notebook prints the same sentences for whatever ru
 - SFT solves 100 of 128 feasible items in the trained families where the baseline solved 11, and 0 of 64
   feasible held-out items. Every held-out acceptance in every arm is a trap refusal, so every arm is below the
   0.200 floor on the held-out families. SFT emits the right schema on 80 of 80 held-out items; the failure is
-  content, not format. The held-out design separated procedure from template, and the answer was template.
+  content, not format. The held-out design separated in-distribution gain from transfer, and there was no transfer; whether that is template
+  memorisation or a 1.5B model's limit on any unseen task type is not decided by this split alone, since no arm solved a
+  held-out item.
 - The LoRA is a single seed. A second fit of the same recipe on the same data scored 0.463 [0.400, 0.525]
   against 0.504 [0.442, 0.567] here, with the same mean training loss; the aggregate CIs overlap and per-family
   cells move by several items. The 0.074 quoted as the training loss is the Trainer's mean over the epoch; the
@@ -239,9 +257,9 @@ prepeval/
   readings.py    derived readings for the notebook's live narrative (bare-JSON share, refusal rates with Fisher exact,
                  held-out acceptance split into solved items and trap refusals, few-shot wins by family, PoT sandbox
                  outcomes against cap hits) and the Markdown renderers; stored in results.json under summary.readings
-  figures.py     the notebook figures (acceptance, outcomes per family, refusal rates, loss curve, paired
-                 transitions, in-train vs held-out split; a training-length histogram is available but not
-                 drawn); never selects a backend
+  figures.py     the notebook figures (labware primer, acceptance, outcomes per family, refusal rates, loss
+                 curve, paired transitions, in-train vs held-out split; a training-length histogram is available
+                 but not drawn); never selects a backend
 data/            test.jsonl (240), train.jsonl (1 431), fewshot.jsonl (2), manifest.json (seeds, sha256, PLR commit)
 notebook/        prep_eval_colab.py (jupytext percent source) and the built .ipynb; the narrative cells hold the
                  story and the numbers in the text are computed from the run that is executing

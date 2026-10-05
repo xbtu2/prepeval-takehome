@@ -15,7 +15,7 @@ import math
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Patch
+from matplotlib.patches import Circle, FancyBboxPatch, Patch, Rectangle
 from matplotlib.textpath import TextPath
 from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 
@@ -129,7 +129,7 @@ def _place_labels(ax, pts, texts, colors, fontsize=9, min_dy=28.0, min_dx=96.0) 
                 va="center", color=colors[i], fontsize=fontsize, linespacing=1.25, arrowprops=leader)
 
 
-def _label_floor(ax, floor: float, tops: list[float], k: int, text: str = "effective floor", fontsize: float = 8) -> None:
+def _label_floor(ax, floor: float, tops: list[float], k: int, text: str = "trivial-classifier floor", fontsize: float = 8) -> None:
   """Label a horizontal reference line in the first x-interval (left edge, gaps, right edge) free of bars that
   reach it; when no interval is wide enough, widen the x-range so the label sits in a gutter after the last bar."""
   fig = ax.figure
@@ -156,7 +156,7 @@ def _label_floor(ax, floor: float, tops: list[float], k: int, text: str = "effec
 # 1. acceptance per arm and per family
 # ----------------------------------------------------------------------------------------------------
 def fig_acceptance(summary: dict, controls: dict, families=None):
-  """Left: acceptance per arm with 95 % CI whiskers and the effective floor. Right: per-family dots per arm."""
+  """Left: acceptance per arm with 95 % CI whiskers and the trivial-classifier floor. Right: per-family dots per arm."""
   arms = list(summary.get("arms", {}))
   if not arms:
     return None
@@ -485,5 +485,119 @@ def fig_heldout_split(summary: dict, readings: dict):
   handles = [Patch(facecolor=BLUE[450], edgecolor="none", label="solved feasible items"),
              Patch(facecolor=BLUE[250], edgecolor="none", label="refused traps")]
   _legend(ax, handles=handles, loc="upper left", handlelength=1.2)
+  fig.tight_layout()
+  return fig
+
+
+# ----------------------------------------------------------------------------------------------------
+# 8. labware primer: a plate, a serial dilution, a direct dilution
+# ----------------------------------------------------------------------------------------------------
+def fig_plate_primer():
+  """Three schematic panels for a reader without lab background: the 96-well plate and its addressing words
+  (block, column under an 8-channel head, column-major index), the 5-point 5-fold serial dilution of item
+  serial_dilution-test-00001, and the one-step C1·V1 = C2·V2 dilution of item dilute_stock-test-00001 with the
+  pipette-minimum trap of dilute_stock-test-00000 as the note. Takes no data; always returns a Figure."""
+  rows, cols, radius = 8, 12, 0.42
+
+  def blank(ax, xlim, ylim):
+    """No ticks or spines, circles stay round, content pinned to the top-left of its slot (titles align)."""
+    ax.set_facecolor(SURFACE)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+      sp.set_visible(False)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_aspect("equal", adjustable="box", anchor="NW")
+
+  def well(ax, x, y, r=radius, fill=SURFACE, edge=GRID, lw=1.0, z=3):
+    ax.add_patch(Circle((x, y), r, facecolor=fill, edgecolor=edge, linewidth=lw, zorder=z))
+
+  def arrow(ax, p, q, color, lw=1.4):
+    ax.annotate("", xy=q, xytext=p, zorder=4,
+                arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, shrinkA=0, shrinkB=0, mutation_scale=11))
+
+  fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4.5), gridspec_kw={"width_ratios": [1.0, 1.1, 1.0]})
+  fig.patch.set_facecolor(SURFACE)
+
+  # panel 1: the plate. A1 top-left; the linear index is column-major (A1 = 0, B1 = 1, ..., H1 = 7, A2 = 8).
+  block = {(r, c) for r in range(1, 4) for c in range(1, 5)}  # B2:D5 (0-based row, col)
+  d2 = (1, 3)  # column 2, row D
+  for c in range(cols):
+    ax1.text(c + 1, 0.8, str(c + 1), ha="center", va="center", color=TEXT2, fontsize=8.5)
+    for r in range(rows):
+      fill = SERIES[0] if (r, c) in block else SERIES[2] if c == 9 else SURFACE
+      if (c, r) == d2:
+        edge, lw, z = TEXT, 2.0, 4
+      elif fill != SURFACE:
+        edge, lw, z = SURFACE, 1.5, 3
+      else:
+        edge, lw, z = GRID, 1.0, 3
+      well(ax1, c + 1, -r, fill=fill, edge=edge, lw=lw, z=z)
+  for r in range(rows):
+    ax1.text(0.2, -r, "ABCDEFGH"[r], ha="center", va="center", color=TEXT2, fontsize=8.5)
+  d2_index = d2[0] * rows + d2[1]  # the module's column-major rule (labware.index_of_well)
+  key = [(SERIES[0], SURFACE, 1.5, f"block B2:D5 = {len(block)} wells"),
+         (SERIES[2], SURFACE, 1.5, "8-channel head: one column at a time"),
+         (SERIES[0], TEXT, 2.0, f"D2 = column-major index {d2_index} (A1 = 0)")]
+  for i, (fill, edge, lw, text) in enumerate(key):  # swatches are the wells themselves, text in ink
+    y = -(rows + 0.5) - 0.95 * i
+    well(ax1, 1, y, fill=fill, edge=edge, lw=lw)
+    ax1.text(1.65, y, text, ha="left", va="center", color=TEXT, fontsize=8.5)
+  ax1.text(1 - radius, -(rows + 3.6), "every well has a maximum volume (360 µL here);\na plan that overfills a well is infeasible",
+           ha="left", va="top", color=TEXT2, fontsize=8, linespacing=1.4)
+  blank(ax1, (-0.25, 12.7), (-(rows + 5.3), 1.25))
+  _title(ax1, "A 96-well plate")
+
+  # panel 2: 5-point, 5-fold serial dilution along row A (item serial_dilution-test-00001)
+  carry, per_well, concs = 12.5, 50.0, [40, 8, 1.6, 0.32, 0.064]
+  pale = mcolors.to_hex(0.5 * np.array(mcolors.to_rgb(BLUE[250])) + 0.5 * np.array(mcolors.to_rgb(SURFACE)))
+  ramp = [BLUE[600], BLUE[450], BLUE[350], BLUE[250], pale]  # one hue, dark -> light as concentration falls
+  step = 1.6
+  last = (len(concs) - 1) * step
+  for i, (conc, fill) in enumerate(zip(concs, ramp)):
+    x = i * step
+    well(ax2, x, 0, fill=fill, edge=SURFACE, lw=1.5)
+    ax2.text(x, 0, f"A{i + 1}", ha="center", va="center", color=_ink_on(fill), fontsize=8)
+    ax2.text(x, -0.75, f"{conc:g}", ha="center", va="top", color=TEXT, fontsize=9)
+    if i < len(concs) - 1:
+      arrow(ax2, (x + radius + 0.06, 0), (x + step - radius - 0.06, 0), TEXT2)
+  arrow(ax2, (last + radius + 0.06, 0), (last + 1.05, 0), MUTED)
+  ax2.text(last + 1.15, 0, f"discard\n{carry:g} µL", ha="left", va="center", color=TEXT2, fontsize=8, linespacing=1.3)
+  ax2.text(last / 2, 0.75, f"carry {carry:g} µL into the next well and mix", ha="center", va="bottom", color=TEXT, fontsize=8.5)
+  ax2.text(last / 2, -1.4, "concentration, µg/mL (÷ 5 each step)", ha="center", va="top", color=TEXT2, fontsize=8)
+  ax2.text(last / 2, -2.25, f"A2–A5 are pre-filled with {per_well:g} µL diluent;\neach well ends at {per_well:g} µL;\n"
+           "the last carry-out is discarded", ha="center", va="top", color=TEXT2, fontsize=8, linespacing=1.4)
+  blank(ax2, (-0.6, 8.9), (-3.8, 1.4))
+  _title(ax2, "A 5-point, 5-fold serial dilution along row A")
+
+  # panel 3: one direct dilution (item dilute_stock-test-00001); the note is the trap of dilute_stock-test-00000
+  xs, xw, xwell, ywell, rwell = 1.0, 4.6, 2.8, 2.3, 0.62
+  tube = FancyBboxPatch((xs - 0.35, 4.0), 0.7, 1.5, boxstyle="round,pad=0,rounding_size=0.3", facecolor="none",
+                        edgecolor=GRID, linewidth=1.2, zorder=4)
+  stock = Rectangle((xs - 0.35, 4.0), 0.7, 1.05, facecolor=SERIES[0], edgecolor="none", zorder=3)
+  ax3.add_patch(stock)
+  ax3.add_patch(tube)
+  stock.set_clip_path(tube)
+  ax3.add_patch(Rectangle((xw - 0.55, 4.0), 1.1, 1.05, facecolor=BLUE[250], edgecolor="none", zorder=3))
+  ax3.plot([xw - 0.55, xw - 0.55, xw + 0.55, xw + 0.55], [5.5, 4.0, 4.0, 5.5], color=GRID, linewidth=1.2, zorder=4,
+           solid_joinstyle="miter")  # an open beaker
+  ax3.text(xs, 5.65, "stock 5 M", ha="center", va="bottom", color=TEXT, fontsize=9)
+  ax3.text(xw, 5.65, "water", ha="center", va="bottom", color=TEXT, fontsize=9)
+  well(ax3, xwell, ywell, r=rwell, fill=BLUE[350], edge=SURFACE, lw=1.5)
+  for x0, color, lw in ((xs, SERIES[0], 1.5), (xw, BLUE[250], 3.5)):  # arrow tips end on the well's rim
+    dx, dy = xwell - x0, ywell - 3.9
+    n = math.hypot(dx, dy)
+    arrow(ax3, (x0, 3.9), (xwell - rwell * dx / n, ywell - rwell * dy / n), color, lw=lw)
+  ax3.text(xs + 0.5, 3.25, "30 µL stock", ha="right", va="top", color=TEXT, fontsize=9)
+  ax3.text(xw - 0.5, 3.25, "270 µL water", ha="left", va="top", color=TEXT, fontsize=9)
+  ax3.text(xwell, ywell - rwell - 0.2, "working solution\n300 µL at 0.5 M", ha="center", va="top", color=TEXT, fontsize=9,
+           linespacing=1.3)
+  ax3.text(xwell, 0.35, "5 M × 30 µL = 0.5 M × 300 µL", ha="center", va="center", color=TEXT, fontsize=10)
+  ax3.text(xwell, -0.25, "pipette minimum 2 µL: a plan needing 0.8 µL\ncannot be executed, so the correct answer is\n"
+           "feasible = false", ha="center", va="top", color=TEXT2, fontsize=8, linespacing=1.4)
+  blank(ax3, (-0.4, 6.2), (-1.6, 6.3))
+  _title(ax3, "One direct dilution (C1·V1 = C2·V2)")
+
   fig.tight_layout()
   return fig

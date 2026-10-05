@@ -176,3 +176,14 @@ def test_fig_transitions(fx):
 def test_fig_heldout_split(fx):
   _assert_renders(FG.fig_heldout_split(fx["summary"], fx["readings"]))
   assert FG.fig_heldout_split(fx["summary"], {"arms": {}}) is None
+
+
+def test_plate_primer_renders():
+  fig = FG.fig_plate_primer()
+  assert isinstance(fig, Figure)
+  buf = io.BytesIO()
+  with warnings.catch_warnings():
+    warnings.simplefilter("error")
+    fig.savefig(buf, format="png", dpi=72)
+  assert buf.getvalue()[:4] == b"\x89PNG"
+  plt.close(fig)

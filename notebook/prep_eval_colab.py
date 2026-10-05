@@ -1,10 +1,14 @@
 # %% [markdown]
 # # Liquid-handling plan reasoning: measure a 1.5B model, then improve it
 #
-# A liquid handler executes whatever numbers and well addresses the planner emits. This notebook evaluates a
-# small open model (`Qwen/Qwen2.5-1.5B-Instruct`) on 240 generated reagent-prep and labware items, tries two
-# prompting interventions, then fine-tunes a LoRA on 1 431 generated traces and measures what it learned and
-# what it did not.
+# A liquid handler is a benchtop robot that pipettes liquid between containers and executes whatever numbers and
+# grid positions it is given, with no check of its own. In ML terms the task here is structured prediction with
+# an exact oracle and an abstention option: each item is a short natural-language request plus every constant
+# needed to answer it; the target is a small JSON of numbers and grid coordinates the robot would execute
+# verbatim; one item in five is unsatisfiable by construction and the only correct output is `feasible: false`.
+# This notebook evaluates a small open model (`Qwen/Qwen2.5-1.5B-Instruct`) on 240 such items, tries two
+# prompting interventions, then fine-tunes a LoRA on 1 431 generated worked solutions and measures what it
+# learned and what it did not.
 #
 # | arm | what changes |
 # |---|---|
@@ -18,38 +22,80 @@
 # below are computed from this run**; a callout before the provenance section quotes the reference run so a
 # Colab result can be compared.
 #
-# **How to run.** Colab: *Runtime → Change runtime type → T4 GPU*, then *Run all* (about 35 min). The same file
-# runs as a plain script (`python notebook/prep_eval_colab.py`); `PREPEVAL_SMOKE=1` runs a tiny version of every
-# cell with a 0.5B model.
+# **How to run.** Colab: *Runtime → Change runtime type → T4 GPU*, then *Run all* (estimated 35 min; not yet
+# timed on a T4). The same file runs as a plain script (`python notebook/prep_eval_colab.py`);
+# `PREPEVAL_SMOKE=1` runs a tiny version of every cell with a 0.5B model.
 #
-# **Reading it in 12 minutes.** (1) One item in both forms and the family table, section 4. (2) The controls
-# and the always-refuse floor, section 4.4. (3) The results table and the acceptance figure, section 8. (4) The
-# in-train versus held-out figure, section 8. (5) The few-shot and PoT readings, section 5. (6) Future
-# directions, section 9. Everything else is the evidence behind those six stops.
+# **Reading it in 12 minutes.** (0) The primer below if you have never seen a well plate. (1) The family table
+# in section 4, then one item with its gold and worked trace in 4.3. (2) The controls and the trivial-classifier
+# floor, 4.4. (3) The few-shot and PoT readings, section 5. (4) The results table and Figure 4, section 8.
+# (5) Figure 6, in-train versus held-out, section 8. (6) Future directions, section 9. Everything else is the
+# evidence behind those stops.
+
+# %% [markdown]
+# ### For readers without a lab background
+#
+# **Containers.** A *plate* is a palm-sized tray with a fixed grid of small cups called *wells*: a 96-well plate
+# is 8 rows (A to H) by 12 columns (1 to 12), about 360 µL per well; a 384-well plate is 16 by 24, about 70 µL;
+# a *deep-well* plate has the 96 layout with about 2.4 mL wells. Wells are named like spreadsheet cells (A1 is top-left;
+# `B2:D5` is the rectangle rows B to D by columns 2 to 5). A *trough* is one open basin that all pipette tips
+# share. An *8-channel head* has eight tips in a column and serves a whole plate column in one move.
+#
+# **Liquids.** A *stock* is a concentrated solution; a *diluent* (water, or a named buffer: treat any buffer as
+# water with a name) thins it; the result is a *working solution*. Diluting conserves the amount of substance,
+# C1·V1 = C2·V2, so the stock volume is V_final × C_target / C_stock, the diluent is the remainder, and dilution
+# can only lower a concentration. A *serial dilution* chains this into a geometric series by moving a fixed
+# *carry* volume from each well into the next; an N-point M-fold series has N wells, each M times more dilute
+# than the previous, and the carry out of the last well is *discarded* so every well ends at the same volume. A
+# *master mix* is the shared ingredients of N identical reactions mixed once, scaled by N × (1 + excess).
+# *Normalising* samples means bringing several samples to one common concentration (not z-scoring). The
+# *pipette minimum* is the smallest volume the robot can transfer; *dead volume* is liquid a trough must hold
+# that the tips cannot reach, so the *trough load* is what is aspirated plus the dead volume. Concentration
+# units are molar (M, mM, µM, nM), mass per volume (mg/mL, µg/mL, ng/µL) or relative "X" (a 5X stock is five
+# times the 1X working strength); no item ever converts between kinds, so only SI prefixes are needed.
+#
+# **No lab knowledge is needed to solve any item.** Every constant (concentrations, grid sizes, well capacities,
+# the pipette minimum, policy percentages, dead volumes) and every naming or indexing convention is printed in
+# the item. Reagent names are opaque labels. The capability tested is arithmetic, constraint checking and 2-D
+# grid indexing from natural language. A *family* is one of the six task types. *Acceptance* is exact-match
+# accuracy under tolerance over the whole output. A *trap* is an unsatisfiable item whose only correct answer is
+# `feasible: false`; answering `feasible: false` is called *abstaining* here (the tables say *refusing*): *trap
+# recall* is the share of traps abstained on, *false refusal* the share of feasible items abstained on.
 
 # %% [markdown]
 # ## 1. Why this capability matters
 #
-# Every transfer, serial dilution, normalisation and master-mix step in a protocol compiler bottoms out in the
-# same arithmetic and addressing: volumes, per-well concentrations, well lists, container choice. A wrong
-# number is a wrong plate, and the robot gives no warning. The task has a second half: recognising that a
-# request cannot be carried out as stated (a stock volume under the pipette minimum, a series that would
-# overflow the wells). A planner that complies with everything is as dangerous as one that refuses everything.
+# Four primitive operations of lab automation (move a volume; build a geometric dilution series; bring samples
+# to a common concentration; batch-mix shared ingredients for N reactions) all reduce to the same arithmetic
+# and 2-D grid indexing: volumes, per-well concentrations, lists of grid cells, container choice. A protocol
+# compiler, the software that turns an experiment's recipe into robot instructions, bottoms out in exactly
+# these numbers. The consumer of the output is a machine: a 10× error is executed as readily as the right
+# number and silently ruins every sample on the plate. So the metric is exact correctness of the whole output
+# within tolerance; one wrong field fails the item.
 #
-# Failures are legible (a unit slip, an inverted factor, a miscounted block), so the error class says why the
-# model is wrong, not only how often. No public dataset of wet-lab calculations with numeric ground truth
-# exists, so the items are generated, seeded and leak-checked, with PyLabRobot supplying labware facts and
-# well addressing.
+# The task has a second half: the 20 % of items that are traps, where the stated constants contradict the
+# request (a stock volume below the pipette minimum; a well that would overflow) and the model must abstain. A
+# planner that complies with everything is as dangerous as one that refuses everything; section 4.4 turns that
+# into a floor the arms must clear.
+#
+# Failures are legible in the raw outputs (a power-of-ten prefix slip, C_target/C_stock used where
+# C_stock/C_target was needed, a rectangle of wells miscounted); the error class records which part failed
+# (format, the feasibility flag, or a value). No public dataset of such calculations with numeric ground truth
+# was found (the nearest are college-chemistry sets such as SciBench and ChemistryQA, and LAB-Bench ProtocolQA,
+# which is multiple-choice troubleshooting), so the items are generated from seeds, leak-checked, and graded
+# against a programmatic answer key.
 
 # %% [markdown]
 # ## 2. Why a small model
 #
-# A frontier model would clear these items on first contact. The question here is whether a model small
-# enough to live on the instrument can, and what it takes to get it there.
+# A frontier model would be expected to clear these items on first contact (not measured here; section 9 lists
+# it). The question here is whether a model small enough to live on the instrument can, and what it takes to
+# get it there.
 #
-# 1. **On-instrument, offline.** The planner runs on the instrument PC, in labs that are air-gapped or under
-#    GxP change control, where every network call in the run loop is a validation item. A 1.5B model in fp16 is
-#    about 3 GB.
+# 1. **Regulated edge deployment.** The planner runs on the PC attached to the robot, often with no network.
+#    In regulated labs (GxP, the family of "good practice" quality regimes) every external dependency in the
+#    execution loop must be formally validated and re-validated when it changes, so an API-served model is a
+#    compliance burden as well as a latency cost. A 1.5B model in fp16 is about 3 GB.
 # 2. **Latency and cost.** Hundreds of planning steps per run, times a fleet; each call has to be fast and
 #    nearly free. Section 5 prints the measured seconds per item.
 # 3. **Ownership.** Pinned, hashed, auditable weights you can fine-tune on your own procedures; no vendor drift
@@ -61,13 +107,16 @@
 # %% [markdown]
 # ## 3. What goes wrong with small models on this task
 #
-# Expectations the eval is built to count; sections 5 and 8 report whether each held on this run.
+# Expectations the eval is built to count. Sections 5 and 8 report on five of them with counts; arithmetic and
+# unit slips show up only in the raw outputs and the appendix, since the grader records which field failed, not
+# why.
 #
 # - **Answering without working.** A bare JSON object instead of a trace: a guess with a format.
 # - **Arithmetic and unit slips.** Inverted dilution factors, raw numerals divided across units, a factor of
 #   1 000 lost between mg/mL and ng/µL.
-# - **Refusals that carry no information.** The model refuses feasible and infeasible requests at the same
-#   rate, so a constant always-refuse policy outscores it by collecting every trap.
+# - **Abstention independent of the label.** If P(abstain | infeasible) equals P(abstain | feasible), the
+#   model's refusals carry no information and it is dominated by the constant always-abstain predictor, which
+#   scores the infeasible-class prior.
 # - **Template over procedure.** A worked example's trace skeleton copied onto items where it is wrong; a
 #   fine-tuned skeleton reproduced on task types never seen.
 # - **Code that is not a program.** A JSON dict inside a Python fence with `true`/`false` spelled as JSON, or a
@@ -90,18 +139,26 @@
 # and one error class per failure. An item is accepted only if every required field passes; an infeasible item
 # is graded on the flag alone.
 #
-# Six families, 40 seeds each; every fifth seed is an infeasible trap, so a model that always complies and one
-# that always refuses both fail. Two families (`normalize_samples`, `labware_fit`) are held out of all training
-# so that learning a procedure and memorising a template can be told apart.
+# Six task types ("families") × 40 parameter draws ("seeds"); every fifth draw is unsatisfiable, which fixes the
+# trivial-classifier floor at 0.20 (always abstain) and about 0 (constant answer). Two task types
+# (`normalize_samples`, `labware_fit`) receive zero training examples: "in-train" and "held-out" below are the
+# in-distribution (same task type, new parameters) and out-of-distribution (unseen task type) splits. The
+# held-out types share some primitives with the trained ones (C1·V1 = C2·V2 per sample; capacity comparisons)
+# and add some no training trace shows (inequality constraints with a set-valued answer; ceiling division and a
+# dead-volume offset), so transfer is a real test, not a formality.
 #
-# | family | the model must produce | trap | ground truth |
+# | family | the model must produce | the math | trap (20 % of items) |
 # |---|---|---|---|
-# | `dilute_stock` | stock and diluent µL for a target concentration and volume, across unit changes | target above stock; stock volume below the pipette minimum | arithmetic |
-# | `serial_dilution` | carry volume, diluent per well, discard, every well's concentration | wells would overflow | arithmetic + PyLabRobot well capacity |
-# | `master_mix` | per-component totals for N reactions with the stated excess, water to volume | recipe does not fit the reaction volume | arithmetic |
-# | `normalize_samples` (held out) | per-sample sample and diluent volumes to a common concentration and minimum volume | a sample already below target | outcome-graded arithmetic |
-# | `well_addressing` | expand `B2:D5`; well at column-major index k; the 8 wells under an 8-channel head; 96→384 quadrant | off-plate addresses | PyLabRobot |
-# | `labware_fit` (held out) | plate vs deep-well vs trough for a volume and channel pattern; plates needed; trough load | nothing fits | PyLabRobot labware + arithmetic |
+# | `dilute_stock` | stock and diluent µL for a target concentration and volume | one linear equation plus a unit-prefix conversion | target above stock; stock volume below the pipette minimum |
+# | `serial_dilution` | carry volume, diluent per well, discard, every well's concentration | a geometric sequence under a fixed final volume, with a well-capacity check | a well would overflow |
+# | `master_mix` | per-ingredient totals for N reactions with the stated excess, water as the remainder | scale a recipe vector by N(1 + ε); water = volume − ingredients | the recipe does not fit the reaction volume |
+# | `normalize_samples` (held out) | per-sample sample and diluent volumes to a common concentration and minimum volume | one linear equation per sample under inequality constraints; set-valued answer | a sample already below the target |
+# | `well_addressing` | expand `B2:D5`; well at column-major index k; the 8 wells of a column; copy a 96-well plate into one quadrant of a 384-well plate (every second row and column) | 2-D index conversions (rectangle, linear index, column slice, stride-2 sub-lattice) | off-grid addresses |
+# | `labware_fit` (held out) | plate vs deep-well vs trough for a volume and pattern; plates needed; trough load (aspirated volume plus dead volume) | capacity comparisons, ceiling division, a dead-volume offset | nothing fits |
+#
+# Plate geometries (rows × columns, well capacity) and the indexing conventions come from PyLabRobot, the
+# open-source library that drives these robots, at a pinned commit, so the grid facts are a third party's, not
+# mine; the model never sees the library.
 
 # %% [markdown]
 # ### 4.1 Configuration
@@ -230,13 +287,20 @@ def show_fig(fig, path, width_px=None):
 
 print("display:", "kernel (inline figures)" if IN_KERNEL else "script (figures saved to files)")
 
+# %%
+show_md("**Figure 1. The labware in one figure.** Left: a 96-well plate with a rectangular block, the column an 8-channel head "
+        "serves, and one indexed well. Middle: a 5-point, 5-fold serial dilution with the numbers of a real test item. Right: one "
+        "direct dilution and the pipette-minimum case that makes an item infeasible.")
+show_fig(FIG.fig_plate_primer(), out_name("fig_primer.png"))
+
 # %% [markdown]
 # ### 4.3 The items
 #
 # The item files are committed and loaded, not regenerated, so the eval is pinned. `data/manifest.json` carries
 # their SHA-256, the PyLabRobot commit and the build-time leak check (no test prompt in train, held-out families
 # absent from train, no gold value printed in its own prompt except values the item gives by construction, no
-# few-shot value in a test gold). Below: the composition of this run's test set and one item in full.
+# few-shot value in a test gold). Below: the composition of this run's test set and one item in full, with the
+# generator's own worked solution (the "trace") that explains its gold.
 
 # %%
 manifest = json.load(open("data/manifest.json"))
@@ -259,18 +323,22 @@ test = first_n_per_family(test_all, N_PER_FAMILY)
 train = train_all if SFT_TRAIN_ITEMS is None else train_all[:: max(1, len(train_all) // SFT_TRAIN_ITEMS)][:SFT_TRAIN_ITEMS]
 show_md(RD.render_items_line(test, train_all, manifest) + f" Held-out families (never in train): {', '.join(f'`{f}`' for f in F.HELDOUT_FAMILIES)}.")
 print("\nExample item\n" + "-" * 80 + "\n" + test[0].prompt + "\n" + "-" * 80 + "\ngold: " + json.dumps(test[0].gold))
+print("why:  " + test[0].trace)
 
 # %% [markdown]
 # ### 4.4 Grading and controls
 #
-# Before any model call the grader is checked against itself: every gold must be accepted; every single-field
-# corruption of a gold (+3 % beyond tolerance, ×1000 unit slip, flipped flag, dropped or shifted well, other
-# container) must be rejected; a program that prints the gold must pass through sandbox, extractor and grader;
-# two constant policies set the floor.
+# Before any model call the grader is checked against itself. Every gold must be accepted (the grader is
+# self-consistent); every single-field corruption of a gold (+3 % beyond tolerance, ×1000 prefix slip, flipped
+# flag, dropped or shifted well, other container) must be rejected (the grader discriminates); a program that
+# prints the gold must pass through sandbox, extractor and grader (the tool path is lossless); two constant
+# predictors set the floor; the build-time leak check rules out contamination.
 #
-# The strongest non-solving control is the **effective floor**. With a 20 % trap share the always-infeasible
-# policy scores 0.200. Any arm below that number is doing less than a policy that never computes anything;
-# this matters in section 5.
+# The strongest non-solving control is the **trivial-classifier floor** (`effective_floor` in the table below):
+# the better of the two constant predictors, here always-abstain at the infeasible-class prior of 0.200. An arm
+# below it has negative skill: its answers and abstentions are jointly worse than ignoring the input. This
+# matters in section 5. Trap recall and false refusal in the results tables are computed over all items, with an
+# unparseable output counted as not abstaining; the Fisher tests in the text use parsed outputs only.
 
 # %%
 controls = {}
@@ -325,7 +393,6 @@ MAX_LEN = 1024  # SFT sequence cap; the longest training row is 782 tokens (chec
 if "sft" in ARMS:
   train_lens = [len(tok(tok.apply_chat_template(P.messages_baseline(it), tokenize=False, add_generation_prompt=True) + P.sft_target(it))["input_ids"]) + 1 for it in train]
   assert max(train_lens) <= MAX_LEN, f"longest SFT row {max(train_lens)} tokens > MAX_LEN={MAX_LEN}"
-  print(f"SFT rows fit: max {max(train_lens)} tokens <= {MAX_LEN}")
 
 model = load_base()
 import copy
@@ -412,9 +479,10 @@ print("error classes:", dict(Counter(g.error_class for g in pg.values() if not g
 # ## 5. Eval results: the model as it ships, and two prompting levers
 #
 # Three arms on the pristine model, same items, same decoding. `baseline` is the direct question. `fewshot`
-# adds two worked examples (a dilution and a well block, both feasible, both from training families) as prior
-# turns. `pot` asks for one Python block that computes the answer; a subprocess sandbox executes it and the
-# text JSON is the fallback.
+# prepends two solved items as prior turns: one single dilution and one rectangular-range expansion (`C2:F5`),
+# both from trained task types and both feasible, so the demonstrations never show an abstention. `pot` asks
+# for one Python block that computes the answer; a subprocess sandbox executes it and the text JSON is the
+# fallback.
 #
 # Why each should help: worked examples give the model a trace to imitate; code moves arithmetic and well
 # enumeration into the interpreter so the model only has to set up the formula (PAL and Program-of-Thought
@@ -437,7 +505,7 @@ show_md(RD.render_prompting(summary_prompt, R5, controls, timing, caps, BATCH_SI
 
 # %%
 fams = list(summary_prompt["arms"]["baseline"]["per_family"])
-show_md("**Where the prompting arms fail.** One row per family, one panel per arm; each item is one of five outcomes.")
+show_md("**Figure 2. Where the prompting arms fail.** One row per family, one panel per arm; each item is one of five outcomes.")
 show_fig(FIG.fig_outcomes(records_by_arm, test, arms=list(grades_by_arm), families=fams), out_name("fig_outcomes.png"))
 
 # %% [markdown]
@@ -451,12 +519,13 @@ show_fig(FIG.fig_outcomes(records_by_arm, test, arms=list(grades_by_arm), famili
 # only the four training families. `normalize_samples` and `labware_fit` never appear. Items whose prompt
 # duplicated a test prompt were dropped at build time.
 #
-# Each row is a prompt and a completion. The prompt is the baseline arm's chat-templated prompt. The
+# Each row is a prompt and a completion. The prompt is the baseline arm's chat-formatted prompt. The
 # completion is a programmatic reasoning trace, a `Final answer:` line and the gold JSON. Traces are produced by
 # the code that produces the gold, so they are correct by construction, and on infeasible rows they name the
 # check that fails. One in five training rows is infeasible, the same share as the test set. Below: the
 # composition and token lengths, and one feasible and one infeasible completion (the prompt half of each row
-# is the baseline prompt shown in section 4.3).
+# is the baseline prompt shown in section 4.3). Reading them: "X" is the relative concentration unit from the
+# primer, and C1·V1 = C2·V2 is conservation of the dissolved substance.
 
 # %%
 lora_prov, lens, log_history, rows = None, [], [], []
@@ -486,8 +555,8 @@ if "sft" in ARMS:
 # sft arms.
 #
 # Why this recipe: it fits a free T4 in a few minutes, the adapter is small enough to pin and audit (section 2,
-# argument 3), and one epoch over 1 431 rows is enough to learn four procedures if they are learnable at all.
-# The loss curve below is read for one thing: whether the model stopped learning before the epoch ended.
+# argument 3), and one epoch over 1 431 rows is enough to fit the training distribution; the loss curve below
+# shows whether it plateaued before the epoch ended.
 
 # %%
 if "sft" in ARMS:
@@ -570,20 +639,22 @@ if "sft" in ARMS:
           + (f"the loss first fell under 0.1 at step {first_under}." if first_under else "the loss never fell under 0.1."))
 
 # %%
-show_md("**LoRA training loss** at the logged steps. A curve that is still falling at the end means one epoch was not enough.")
+show_md("**Figure 3. LoRA training loss** at the logged steps. A curve that is still falling at the end means one epoch was not enough.")
 show_fig(FIG.fig_loss_curve(log_history), out_name("fig_loss_curve.png"))
 
 # %% [markdown]
 # ## 8. Training result
 #
 # The fine-tuned model is evaluated on the same items with the baseline prompt. This section holds the complete
-# results table: all four arms, acceptance with 95 % bootstrap CI, in-train and
-# held-out acceptance, trap recall, false-refusal rate, format-failure rate, the paired delta against the
-# baseline and the exact McNemar p-value. Per-family cells (n = 40) are directional at about ±15 points; the
-# n = 240 aggregate carries the claim.
+# results table: all four arms, acceptance with 95 % bootstrap CI, in-train and held-out acceptance, trap recall
+# (recall on the infeasible class), false-refusal rate (abstention rate on feasible items, the false-positive
+# rate of the abstain decision), format-failure rate (unparseable output), the paired delta against the baseline
+# and the exact McNemar p-value. Per-family cells (n = 40) are directional at about ±15 points; the n = 240
+# aggregate carries the claim.
 #
-# Two questions decide what the fine-tune proved. Did it clear the always-refuse floor in the trained families.
-# Did any of it transfer to the two held-out families.
+# Two questions decide what the fine-tune proved. In-train (in distribution): on the four trained task types
+# with unseen parameter values, does it beat the 0.200 trivial-classifier floor? Held-out (out of distribution):
+# on the two task types it never saw, does any skill transfer, or did it learn four trace skeletons?
 
 # %%
 if "sft" in ARMS:
@@ -600,26 +671,26 @@ show_md(RD.floor_lines(summary, controls))
 show_md(RD.render_sft(summary, R, controls, lora_prov, smoke=SMOKE))
 
 # %%
-show_md("**Acceptance by arm and by family.** Left: acceptance with 95 % bootstrap CI and the always-refuse floor. "
-        "Right: per family; the two held-out families are labelled (held-out).")
+show_md("**Figure 4. Acceptance by arm and by family.** Left: acceptance with 95 % bootstrap CI and the trivial-classifier floor "
+        "(always abstain). Right: per family; the two held-out families are labelled (held-out).")
 show_fig(FIG.fig_acceptance(summary, controls), out_name("figure.png"))
 
 # %%
 arm_b = "sft" if "sft" in grades_by_arm else ("fewshot" if "fewshot" in grades_by_arm else None)
 if arm_b:
-  show_md(f"**Paired item transitions baseline → {arm_b}.** Items the second arm fixes point right; items it breaks point left. "
-          "These discordant pairs are what the McNemar test counts.")
+  show_md(f"**Figure 5. Paired item transitions baseline → {arm_b}.** Items the second arm fixes point right; items it breaks point "
+          "left. These discordant pairs are what the McNemar test counts.")
   show_fig(FIG.fig_transitions(grades_by_arm, test, "baseline", arm_b, families=fams, comparison=summary["comparisons"].get(arm_b)),
            out_name(f"fig_transitions_{arm_b}.png"))
 
 # %%
-show_md("**What the acceptances are.** In-train and held-out acceptance per arm, split into solved feasible items and refused traps. "
-        "Transfer to a new family would show up as a solved-feasible segment in a held-out bar.")
+show_md("**Figure 6. What the acceptances are.** In-train and held-out acceptance per arm, split into solved feasible items and "
+        "refused traps. Transfer to a new family would show up as a solved-feasible segment in a held-out bar.")
 show_fig(FIG.fig_heldout_split(summary, R), out_name("fig_heldout_split.png"))
 
 # %%
-show_md("**Does the `feasible` flag carry information?** Refusal rate on feasible items (x) against refusal rate on traps (y), all "
-        "four arms. A flag that tracks infeasibility sits above the diagonal; a flag that refuses at random sits on it.")
+show_md("**Figure 7. Does the `feasible` flag carry information?** Abstention rate on feasible items (x) against abstention rate "
+        "on traps (y), all four arms. A flag that tracks infeasibility sits above the diagonal; a flag that abstains at random sits on it.")
 show_fig(FIG.fig_refusals(summary, R), out_name("fig_refusals.png"))
 
 # %% [markdown]
@@ -631,7 +702,7 @@ show_fig(FIG.fig_refusals(summary, R), out_name("fig_refusals.png"))
 # > baseline 0.092 [0.058, 0.129]; fewshot 0.154 (+0.063, McNemar p = 0.017); pot 0.062 (−0.029, p = 0.23);
 # > sft 0.504 [0.442, 0.567] (+0.412, p = 1.1e-22).
 # > In-train / held-out acceptance: baseline 0.100 / 0.075, fewshot 0.200 / 0.062, pot 0.075 / 0.037,
-# > sft 0.725 / 0.062. Effective floor 0.200 (always-infeasible policy).
+# > sft 0.725 / 0.062. Trivial-classifier floor 0.200 (always-abstain policy).
 # > Accepted per family, of 40 (baseline / fewshot / pot / sft): dilute_stock 3 / 26 / 4 / 30;
 # > serial_dilution 4 / 0 / 3 / 32; master_mix 0 / 0 / 0 / 29; well_addressing 9 / 6 / 5 / 25;
 # > normalize_samples (held out) 6 / 5 / 3 / 5; labware_fit (held out) 0 / 0 / 0 / 0.
@@ -692,8 +763,9 @@ show_md(ST.results_table(summary) + "\n\n" + ST.family_table(summary), code=True
 #    current gain is confined to the exemplar's family and has not been separated from the item change.
 # 4. A second LoRA seed, and a five-train / one-held-out rotation so transfer is tested per family rather than
 #    on two fixed families.
-# 5. Grading by replaying the plan through PyLabRobot's volume trackers, so any correct construction passes in
-#    every family (today only `normalize_samples` is outcome-graded).
+# 5. Grade by simulating the plan's end state (per-well volumes and concentrations) in a third-party simulator
+#    (PyLabRobot's volume trackers) instead of matching the plan's parameters, so any plan that reaches the right
+#    end state passes: an outcome-based, set-valued oracle, which today only `normalize_samples` has.
 # 6. A frontier reference arm to measure the ceiling instead of asserting it, and a GSM8K slice before and
 #    after the LoRA to show no general regression.
 # 7. A small real-text split from CC-BY protocol recipe tables, hand-checked, as a distribution-shift probe.
@@ -706,7 +778,11 @@ show_md(ST.results_table(summary) + "\n\n" + ST.family_table(summary), code=True
 # ## Appendix: failure examples
 #
 # Reviewers trust examples more than CIs. One per error class per arm; the full outputs are in
-# `results/raw_outputs.jsonl`.
+# `results/raw_outputs.jsonl`. Error classes: `format` means no parseable JSON object (arithmetic left inside a
+# value, an unclosed bracket, a truncated output); `feasibility` means the `feasible` flag is wrong (a trap
+# answered, or a feasible item refused); `wrong_value` means the flag is right and at least one field is outside
+# tolerance. The grader lower-cases keys before matching, which is why `pred` shows `stock_ul` against the
+# gold's `stock_uL`.
 
 # %%
 for arm, recs in records_by_arm.items():

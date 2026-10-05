@@ -222,9 +222,9 @@ def _flag_verdict(ref: dict) -> str:
   rate_t = ref["trap"] / tn if tn else 0.0
   rate_f = ref["feasible"] / fn if fn else 0.0
   if p >= 0.1:
-    return "the flag carries no information, so its trap refusals are refusals it would have made anyway" + small
+    return "abstention at chance, independent of the label, so its trap refusals are refusals it would have made anyway" + small
   if p < 0.05 and rate_t > rate_f:
-    return "the flag carries information" + small
+    return "abstention tracks infeasibility" + small
   return "inconclusive" + small
 
 
@@ -239,8 +239,8 @@ def _arm_headline(summary: dict, arm: str) -> str:
 
 def floor_lines(summary: dict, controls: dict) -> str:
   floor = controls["effective_floor"]
-  rows = [f"Effective floor (strongest non-solving control): **{fmt_num(floor)}**. Margin over the floor is acc − floor; "
-          f"the normalised position is (acc − floor)/(1 − floor)."]
+  rows = [f"Trivial-classifier floor (`effective_floor`; the always-abstain policy): **{fmt_num(floor)}**. Margin over the floor is "
+          f"acc − floor; the normalised position is (acc − floor)/(1 − floor)."]
   for arm, a in summary["arms"].items():
     acc = a["acc"]
     norm = (acc - floor) / (1 - floor) if _finite(acc) and floor < 1 else float("nan")
@@ -307,14 +307,18 @@ def render_prompting(summary: dict, R: dict, controls: dict, timing: dict, caps:
   # (b) the floor and the feasible flag
   above = [a for a in arms if _finite(summary["arms"][a]["acc"]) and summary["arms"][a]["acc"] > floor]
   where = "above" if len(above) == len(arms) else ("below" if not above else "around")
-  lines = [f"**Why the prompting arms sit {where} the always-refuse floor of {fmt_num(floor)}.** A policy that refuses "
-           f"every item scores the trap share. To beat it a model has to solve feasible items faster than it loses traps."]
+  w_f = R["n_feasible"] / n if n else 0.0
+  lines = [f"**Why the prompting arms sit {where} the trivial-classifier floor of {fmt_num(floor)}.** Acceptance = "
+           f"{w_f:.2f} · P(exact | feasible) + {1 - w_f:.2f} · P(abstain | infeasible), so always-abstain scores the infeasible-class "
+           f"prior. To beat it a model must gain more on feasible items than it forfeits on infeasible ones, which is impossible "
+           f"while its abstention is independent of the label."]
   for a in arms:
     ref = R["arms"][a]["refusals"]
     ff = R["arms"][a]["forced_feasible"]
-    lines.append(f"- `{a}`: refuses {ref['trap']}/{ref['trap_n']} traps vs {ref['feasible']}/{ref['feasible_n']} feasible items "
-                 f"({fmt_p(ref['fisher_p'])}): {_flag_verdict(ref)}. Forced `feasible = true` would score {fmt_num(ff['acc'])} "
-                 f"(recorded {fmt_num(summary['arms'][a]['acc'])})"
+    lines.append(f"- `{a}`: abstains on {ref['trap']}/{ref['trap_n']} infeasible vs {ref['feasible']}/{ref['feasible_n']} feasible items "
+                 f"({fmt_p(ref['fisher_p'])}; parsed outputs only, {ref['unparsed']} unparsed excluded): {_flag_verdict(ref)}. "
+                 f"Ablating the abstain action (forcing `feasible = true`) leaves a "
+                 f"pure solving rate of {fmt_num(ff['acc'])} against the recorded {fmt_num(summary['arms'][a]['acc'])}"
                  + (f"; {ff['would_pass']} refused feasible item(s) carried correct values." if ff["would_pass"] else "."))
   out.append("\n".join(lines))
 
@@ -348,7 +352,8 @@ def render_prompting(summary: dict, R: dict, controls: dict, timing: dict, caps:
     p = R["pot_sandbox"]
     st = p["status"]
     s = (f"**PoT's failures sit in the model's programs.** Sandbox outcomes: {st.get('ok', 0)} ok, {st.get('runtime_error', 0)} "
-         f"runtime errors, {st.get('rejected', 0)} rejected, {st.get('timeout', 0)} timeouts, {st.get('no_code', 0)} without code.")
+         f"runtime errors, {st.get('rejected', 0)} rejected (failed to parse or failed the import/dunder policy), "
+         f"{st.get('timeout', 0)} timeouts, {st.get('no_code', 0)} without code.")
     if p["rejected"]:
       s += (f" {p['rejected_cap_hits']}/{p['rejected']} rejected programs hit the token cap, so "
             f"{'all of them are truncations rather than policy rejections' if p['rejected_all_cap_hits'] else 'most rejections are truncations'}.")
@@ -382,7 +387,7 @@ def render_sft(summary: dict, R: dict, controls: dict, lora_prov: dict | None, s
   out.append(f"**Headline.** baseline {fmt_num(summary['arms'].get('baseline', {}).get('acc'))} → sft "
              f"{fmt_num(summary['arms']['sft']['acc'])} {fmt_ci(summary['arms']['sft']['ci95'])} on n = {summary['n_items']} items; "
              f"delta {fmt_signed(cmp.get('delta_acc'))} {fmt_ci(cmp.get('delta_ci95'))}, McNemar {fmt_p(cmp.get('p_value'))}. "
-             f"Arms above the always-refuse floor ({fmt_num(floor)}): {', '.join(f'`{a}`' for a in above) if above else 'none'}.")
+             f"Arms above the trivial-classifier floor ({fmt_num(floor)}): {', '.join(f'`{a}`' for a in above) if above else 'none'}.")
 
   # (c) in-train vs held-out
   s_sft, s_bl = R["arms"]["sft"]["split"], R["arms"].get("baseline", {}).get("split")
@@ -411,13 +416,15 @@ def render_sft(summary: dict, R: dict, controls: dict, lora_prov: dict | None, s
     ho_floor = ho["n_traps"] / ho["n"]
     pos = ["below" if R["arms"][a]["split"]["heldout"]["acc"] < ho_floor else ("at" if R["arms"][a]["split"]["heldout"]["acc"] == ho_floor else "above")
            for a in arms]
-    s += (f" Held-out trap refusals: {refs}. The always-refuse policy scores {fmt_num(ho_floor)} on the held-out items; "
+    s += (f" Held-out trap refusals: {refs}. The always-abstain policy scores {fmt_num(ho_floor)} on the held-out items; "
           + ("every arm sits below it there." if all(p == "below" for p in pos) else
              "arms sit " + ", ".join(f"{a} {p}" for a, p in zip(arms, pos)) + " it there."))
     s += (f" SFT emits exactly the schema's keys on {R['arms']['sft']['heldout_schema_exact']}/{ho['n']} held-out items, so "
           f"{'the failure is content, not format' if R['arms']['sft']['heldout_schema_exact'] >= 0.9 * ho['n'] else 'format is also part of the failure'}.")
     if ho_share == 0 and tr_share >= 0.2:
-      s += " The held-out design did its job: it separated procedure from template, and the answer on this run was template."
+      s += (" The held-out design did its job: it separated in-distribution gain from transfer, and on this run there was no "
+            "transfer. Whether that is template memorisation or a 1.5B model's limit on any unseen task type is not decided by "
+            "this split alone; the other arms also solved no held-out item.")
   out.append(s)
 
   # the flag after training
