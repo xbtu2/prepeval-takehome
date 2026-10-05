@@ -54,10 +54,12 @@
 # units are molar (M, mM, µM, nM), mass per volume (mg/mL, µg/mL, ng/µL) or relative "X" (a 5X stock is five
 # times the 1X working strength); no item ever converts between kinds, so only SI prefixes are needed.
 #
-# **No lab knowledge is needed to solve any item.** Every constant (concentrations, grid sizes, well capacities,
-# the pipette minimum, policy percentages, dead volumes) and every naming or indexing convention is printed in
-# the item. Reagent names are opaque labels. The capability tested is arithmetic, constraint checking and 2-D
-# grid indexing from natural language. A *family* is one of the six task types. *Acceptance* is exact-match
+# **No lab facts beyond the item are needed to solve it.** Every constant (concentrations, grid sizes, well
+# capacities, the pipette minimum, policy percentages, dead volumes) and every naming or indexing convention is
+# printed in the item, and reagent names are opaque labels. What a solver does need is to understand what the
+# words denote (a well against a plate, a carry, a shared trough, a pipette's smallest volume) well enough to
+# turn the request into arithmetic and to notice when a number breaks a stated limit; section 3 argues that
+# this is exactly what a small model lacks. A *family* is one of the six task types. *Acceptance* is exact-match
 # accuracy under tolerance over the whole output. A *trap* is an unsatisfiable item whose only correct answer is
 # `feasible: false`; answering `feasible: false` is called *abstaining* here (the tables say *refusing*): *trap
 # recall* is the share of traps abstained on, *false refusal* the share of feasible items abstained on.
@@ -107,24 +109,30 @@
 # %% [markdown]
 # ## 3. What goes wrong with small models on this task
 #
-# Expectations the eval is built to count. Sections 5 and 8 report on five of them with counts; arithmetic and
-# unit slips show up only in the raw outputs and the appendix, since the grader records which field failed, not
-# why.
+# The item gives every fact, but using the facts takes a model of the situation that a small instruction-tuned
+# model mostly lacks. A 1.5B model has read about plates and pipettes; it does not hold them as objects with
+# properties. A plate is a grid of wells, each with a capacity. A serial dilution is a chain of transfers in
+# which each well briefly holds its diluent plus the incoming carry. A trough is one shared source that eight
+# tips draw from at once. A pipette has a smallest volume it can move. Without those objects the model cannot
+# decide which arithmetic a request calls for, and it cannot notice when a computed number breaks a stated
+# limit. Three symptoms follow; sections 5 and 8 count each one on this run.
 #
-# - **Answering without working.** A bare JSON object instead of a trace: a guess with a format.
-# - **Arithmetic and unit slips.** Inverted dilution factors, raw numerals divided across units, a factor of
-#   1 000 lost between mg/mL and ng/µL.
-# - **Abstention independent of the label.** If P(abstain | infeasible) equals P(abstain | feasible), the
-#   model's refusals carry no information and it is dominated by the constant always-abstain predictor, which
-#   scores the infeasible-class prior.
-# - **Template over procedure.** A worked example's trace skeleton copied onto items where it is wrong; a
-#   fine-tuned skeleton reproduced on task types never seen.
-# - **Code that is not a program.** A JSON dict inside a Python fence with `true`/`false` spelled as JSON, or a
-#   program cut off at the token budget.
-# - **Format fragility.** Arithmetic inside JSON values, an unclosed bracket, a loop that runs to the cap.
+# - **Answering without working.** Asked for a JSON object, the model emits the object and nothing else, even
+#   when the instructions invite it to work through the calculation: a guess with a format.
+# - **The wrong computation.** It treats "dilute" as "divide" without tracking which quantity is which, inverts
+#   the dilution factor, miscounts a rectangle of wells, or, asked for a program, writes a JSON object inside a
+#   Python fence. These are setup errors rather than arithmetic slips: the model does not know which quantities
+#   the operation relates.
+# - **No feasibility sense.** It refuses at a rate unrelated to whether the request is possible, because judging
+#   feasibility means comparing a computed volume with a capacity or an address with a grid bound it never
+#   represented. After fine-tuning the pattern is diagnostic: the model learns the checks that are arithmetic on
+#   the item's own numbers (a volume below the pipette minimum, negative water) and none of the checks that need
+#   the labware (a well that would overflow, an address off the plate). Section 8 reports that split.
 #
-# Per item the eval records the error class, the predicted `feasible` flag, the sandbox outcome and whether
-# the token cap was hit, so each of these can be counted rather than guessed at.
+# What the interventions can and cannot do about this is the rest of the notebook. Worked examples and code
+# execution hand the model a template or a calculator, not the missing objects. A fine-tune on worked solutions
+# installs the procedures it is shown, family by family; the two held-out families test whether anything more
+# general comes with them.
 
 # %% [markdown]
 # ## 4. How the eval is built
@@ -753,26 +761,30 @@ show_md(ST.results_table(summary) + "\n\n" + ST.family_table(summary), code=True
 # %% [markdown]
 # ## 9. Future directions
 #
-# In the order they would change a conclusion above:
+# The eval gives an exact reward for every item, and the result says the model lacks the concepts more than
+# the arithmetic. Both point the same way.
 #
-# 1. A zero-shot chain-of-thought baseline ("work step by step, then the JSON") so the reference arm reasons;
-#    on the reference run the baseline answered without working.
-# 2. One token budget for every arm (at least 512) and `true`, `false`, `null` defined in the PoT runner, so no
-#    arm is measured against its cap or its spelling.
-# 3. One infeasible few-shot exemplar, and few-shot reported across several exemplars on one item set; the
-#    current gain is confined to the exemplar's family and has not been separated from the item change.
-# 4. A second LoRA seed, and a five-train / one-held-out rotation so transfer is tested per family rather than
-#    on two fixed families.
-# 5. Grade by simulating the plan's end state (per-well volumes and concentrations) in a third-party simulator
-#    (PyLabRobot's volume trackers) instead of matching the plan's parameters, so any plan that reaches the right
-#    end state passes: an outcome-based, set-valued oracle, which today only `normalize_samples` has.
-# 6. A frontier reference arm to measure the ceiling instead of asserting it, and a GSM8K slice before and
-#    after the LoRA to show no general regression.
-# 7. A small real-text split from CC-BY protocol recipe tables, hand-checked, as a distribution-shift probe.
-# 8. A maj@5 self-consistency arm over executed programs, and SFT combined with PoT, once item 2 has made PoT a
-#    fair arm.
-# 9. Infeasibility discoverable from the world alone (drop the `feasible` key) with the refusal graded as free
-#    text.
+# 1. **Rejection-sampling fine-tuning.** Sample several solutions per training prompt from the fine-tuned model,
+#    keep the ones the grader accepts, and fine-tune on the model's own correct work. Same pipeline as
+#    section 7, no new labels, and the first method any reinforcement-learning result has to beat.
+# 2. **Reinforcement learning with the grader as the reward.** Group-relative policy optimisation (GRPO) over
+#    sampled solutions, with acceptance from the grader and, for programs, execution in the sandbox as the
+#    reward. It optimises the metric this notebook reports and the feasibility decision at the same time, and it
+#    is the natural way to teach the capacity and grid-bound checks the fine-tune did not pick up.
+# 3. **Generalise across the liquid-handling task space.** Train on the full operation set of a protocol
+#    compiler (transfer, serial dilute, normalise, master mix, plate maps, labware choice), hold out families in
+#    rotation to measure transfer, and distil worked solutions from a frontier model for operations the
+#    generators do not cover. Grade by simulating each plan's end state in PyLabRobot's volume trackers, so any
+#    valid plan passes and the same simulator can check a plan before the robot executes it.
+# 4. **Give the model the labware as a tool, not as prose.** Let it query plate geometry, capacities and
+#    indexing through PyLabRobot calls and run its arithmetic in the sandbox, so a small model only has to decide
+#    what to compute. Combining the fine-tune with program execution is the version this notebook already has
+#    the parts for.
+# 5. **Calibrated abstention.** Turn the single operating point (trap recall against false refusal) into a
+#    curve with a confidence signal such as agreement across sampled solutions, so the planner can be set to
+#    refuse when unsure. The robot executes whatever it is given; the abstain decision is the safety mechanism.
+# 6. **Measure the ceiling.** A frontier reference arm on the same items, to show the gap a small model has to
+#    close and that the held-out items are solvable from the prompt.
 
 # %% [markdown]
 # ## Appendix: failure examples

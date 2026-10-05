@@ -36,9 +36,11 @@ concentrated solution, a diluent thins it, and dilution conserves the dissolved 
 only lower a concentration. A serial dilution chains dilutions into a geometric series by carrying a fixed volume
 from well to well; a master mix is the shared ingredients of N reactions mixed once with a stated excess;
 normalising brings several samples to one concentration. The pipette minimum is the smallest transferable volume;
-dead volume is liquid a trough must hold that the tips cannot reach. **No lab knowledge is needed to solve any
-item**: every constant and convention is printed in the prompt, reagent names are opaque labels, units never
-cross kinds, and the capability tested is arithmetic, constraint checking and 2-D grid indexing.
+dead volume is liquid a trough must hold that the tips cannot reach. **No lab facts beyond the item are needed to
+solve it**: every constant and convention is printed in the prompt, reagent names are opaque labels, and units
+never cross kinds. What a solver does need is to understand what the words denote (a well against a plate, a
+carry, a shared trough, a pipette's smallest volume) well enough to turn the request into arithmetic and to
+notice when a number breaks a stated limit; the results say that is what a small model lacks.
 
 ![Labware primer: a 96-well plate with a block, a column and an indexed well; a 5-point serial dilution; one direct dilution with the pipette-minimum case](results/reference/fig_primer.png)
 
@@ -241,7 +243,10 @@ executes; its numbers are not results.
   reading it as a capability effect.
 - PoT was measured at a 320-token budget against 512 for the other arms; part of its deficit is the cap.
 - The LoRA result is "teaches the procedures it is shown". No transfer to the held-out families was measured, and
-  the adapter is a single seed: two fits of the same recipe on the same data scored 0.463 and 0.504.
+  the adapter is a single seed: three fits of the same recipe on the same data scored 0.463, 0.504 and 0.500.
+- The baseline answered without working on every item; a chain-of-thought baseline would be the fairer reference
+  arm. Equal token budgets for all arms and several LoRA seeds are the other two things to fix before the next
+  run.
 
 ## 6. Layout
 
@@ -273,27 +278,35 @@ Rebuild the notebook after editing the source: `.venv/bin/jupytext --to ipynb no
 (`tests/test_notebook.py` fails when the two drift). To prove the figures render inline without Colab, install
 `ipykernel nbclient` into the venv and execute the `.ipynb` headlessly in smoke mode with `nbclient`.
 
-## 7. What I would do differently with more time
+## 7. Future directions
 
-In the order they would change a conclusion above:
+The eval gives an exact reward for every item, and the result says the model lacks the concepts more than the
+arithmetic. Both point the same way.
 
-1. A zero-shot chain-of-thought baseline ("work step by step, then the JSON") so the reference arm reasons; on
-   the reference run the baseline answered without working.
-2. One token budget for every arm (at least 512) and `true`, `false`, `null` defined in the PoT runner, so no arm
-   is measured against its cap or its spelling.
-3. One infeasible few-shot exemplar, and few-shot reported across several exemplars on one item set; the
-   current gain is confined to the exemplar's family and has not been separated from the item change.
-4. A second LoRA seed, and a five-train / one-held-out rotation so transfer is tested per family rather than on
-   two fixed families.
-5. Grade by **replaying the model's plan** through PyLabRobot's volume trackers (a third-party bookkeeping
-   oracle) instead of matching plan parameters, so any correct construction passes for every family.
-6. Run a frontier reference arm to measure the ceiling instead of asserting it, and a GSM8K slice before and
-   after the LoRA to show no general regression.
-7. Add a small real-text split from CC-BY protocol recipe tables, hand-checked, as a distribution-shift probe.
-8. Add a `maj@5` self-consistency arm over executed programs, and SFT + PoT together, once item 2 has made PoT a
-   fair arm.
-9. Make infeasibility discoverable from the world alone (drop the `feasible` key) and grade the refusal as a
-   free-text report.
+1. **Rejection-sampling fine-tuning.** Sample several solutions per training prompt from the fine-tuned model,
+   keep the ones the grader accepts, and fine-tune on the model's own correct work. Same pipeline as the SFT
+   cell, no new labels, and the first method any reinforcement-learning result has to beat.
+2. **Reinforcement learning with the grader as the reward.** GRPO over sampled solutions, with acceptance from
+   the grader and, for programs, execution in the sandbox as the reward. It optimises the reported metric and the
+   feasibility decision at the same time, and it is the natural way to teach the capacity and grid-bound checks
+   the fine-tune did not pick up (it learned 16 of 16 arithmetic-check traps and 0 of 16 labware-check traps).
+3. **Generalise across the liquid-handling task space.** Train on the full operation set of a protocol compiler,
+   hold out families in rotation to measure transfer, distil worked solutions from a frontier model for
+   operations the generators do not cover, and grade by simulating each plan's end state in PyLabRobot's volume
+   trackers so any valid plan passes and the same simulator can check a plan before the robot executes it.
+4. **Give the model the labware as a tool, not as prose.** Let it query plate geometry, capacities and indexing
+   through PyLabRobot calls and run its arithmetic in the sandbox, so a small model only has to decide what to
+   compute; combining the fine-tune with program execution is the version this repository already has the
+   parts for.
+5. **Calibrated abstention.** Turn the single operating point (trap recall against false refusal) into a curve
+   with a confidence signal such as agreement across sampled solutions, so the planner can be set to refuse when
+   unsure.
+6. **Measure the ceiling.** A frontier reference arm on the same items, to show the gap a small model has to
+   close and that the held-out items are solvable from the prompt.
+
+The confounds a reader should keep in mind while reading the current numbers (PoT's smaller token budget, the
+exemplar-dependence of few-shot, the single LoRA seed, the baseline that answered without working) are listed in
+section 5; they are housekeeping for the next run, not directions.
 
 ## References
 

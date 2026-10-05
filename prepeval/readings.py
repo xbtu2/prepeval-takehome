@@ -25,6 +25,12 @@ from .families import HELDOUT_FAMILIES
 _LEAD_FENCE = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
 _NAME_ERR = re.compile(r"name '(true|false|null)'")
 
+# Trap kinds whose check is arithmetic on the item's own numbers, versus checks that need a labware fact
+# (a well capacity or a grid bound). Used to say what a model's abstention has actually learned.
+ARITHMETIC_TRAPS = {"below_pipette_min", "target_above_stock", "recipe_overfills", "sample_below_target"}
+LABWARE_TRAPS = {"well_overflow", "off_plate_corner", "index_off_plate", "column_off_plate", "source_off_plate",
+                 "trough_overfill", "volume_exceeds_all_wells"}
+
 
 # ----------------------------------------------------------------------------------------------------
 # formatting (every number in the narrative goes through one of these)
@@ -136,7 +142,22 @@ def derive_readings(test, grades_by_arm, records_by_arm, summary, fewshot=None, 
 
     in_train = [it for it in items if it.family not in HELDOUT_FAMILIES]
     heldout = [it for it in items if it.family in HELDOUT_FAMILIES]
+    def _kind(it):
+      return (getattr(it, "meta", None) or {}).get("trap") or "unknown"
+
+    by_kind: dict = {}
+    for it in traps:
+      d = by_kind.setdefault(_kind(it), {"abstained": 0, "n": 0, "family": it.family})
+      d["n"] += 1
+      d["abstained"] += int(refused(it))
+
+    def _group(kinds, in_train_only):
+      sel = [it for it in traps if _kind(it) in kinds and (it.family not in HELDOUT_FAMILIES or not in_train_only)]
+      return {"abstained": int(sum(map(refused, sel))), "n": len(sel)}
     R["arms"][arm] = {
+      "trap_kinds": by_kind,
+      "trap_checks": {"arithmetic_in_train": _group(ARITHMETIC_TRAPS, True), "labware_in_train": _group(LABWARE_TRAPS, True),
+                      "arithmetic_all": _group(ARITHMETIC_TRAPS, False), "labware_all": _group(LABWARE_TRAPS, False)},
       "n": len(items), "accepted": len(acc_items),
       "n_with_reasoning": None if tool_arm else int(sum(has_reasoning(r.get("raw")) for r in recs)),
       "refusals": {"trap": int(tr), "trap_n": len(parsed_t), "feasible": int(fe), "feasible_n": len(parsed_f),
@@ -427,10 +448,22 @@ def render_sft(summary: dict, R: dict, controls: dict, lora_prov: dict | None, s
             "this split alone; the other arms also solved no held-out item.")
   out.append(s)
 
-  # the flag after training
+  # the flag after training, and which checks it learned
   ref = R["arms"]["sft"]["refusals"]
-  out.append(f"**SFT's `feasible` flag:** refuses {ref['trap']}/{ref['trap_n']} traps against {ref['feasible']}/{ref['feasible_n']} "
-             f"feasible items ({fmt_p(ref['fisher_p'])}); {_flag_verdict(ref)}.")
+  s = (f"**SFT's `feasible` flag:** refuses {ref['trap']}/{ref['trap_n']} traps against {ref['feasible']}/{ref['feasible_n']} "
+       f"feasible items ({fmt_p(ref['fisher_p'])}); {_flag_verdict(ref)}.")
+  tc = R["arms"]["sft"]["trap_checks"]
+  a, l = tc["arithmetic_in_train"], tc["labware_in_train"]
+  if a["n"] and l["n"]:
+    bl = R["arms"].get("baseline", {}).get("trap_checks")
+    s += (f" By trap type in the trained families: it abstains on {a['abstained']}/{a['n']} traps whose check is arithmetic on the "
+          f"item's own numbers (pipette minimum, negative water, target above stock) and on {l['abstained']}/{l['n']} whose check "
+          f"needs a labware fact (a well that would overflow, an address off the plate)"
+          + (f"; the baseline: {bl['arithmetic_in_train']['abstained']}/{bl['arithmetic_in_train']['n']} and "
+             f"{bl['labware_in_train']['abstained']}/{bl['labware_in_train']['n']}." if bl else "."))
+    if a["abstained"] / a["n"] >= 0.8 and l["abstained"] / l["n"] <= 0.2:
+      s += " The fine-tune installed the arithmetic checks and none of the labware checks, which is the section 3 picture."
+  out.append(s)
 
   # paired transitions
   if "sft" in R["comparisons"]:
